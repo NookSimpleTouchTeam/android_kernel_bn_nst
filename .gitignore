@@ -25,7 +25,8 @@
 *.elf
 *.bin
 *.gz
-
+*.rej
+*.orig
 #
 # Top-level generic files
 #
