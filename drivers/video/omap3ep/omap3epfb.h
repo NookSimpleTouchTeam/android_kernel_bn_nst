@@ -251,6 +251,7 @@ struct omap3epfb_par {
 		struct fb_deferred_io defio;
 	} fbvars;
 	bool pgflip_refresh;
+	int fmode;
 	int user_debug;
 	int refresh_percent; /* % == 0, Normal update, % > 0 == GC Update */
 	int disable_flags;
@@ -258,6 +259,7 @@ struct omap3epfb_par {
 	struct mutex area_mutex;
 	int effect_active;
 	char effect_active_debug[EFFECT_ARRAY_SIZE+1];
+	struct delayed_work lost_update;	
 	struct delayed_work clear_work;
 	struct delayed_work disable_work;
 	int clear_delay;
