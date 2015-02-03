@@ -14,20 +14,20 @@
 #include <linux/init.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
+#include <linux/i2c/menelaus.h>
+#include <linux/bootmem.h>
 
 #include <mach/hardware.h>
 #include <asm/mach-types.h>
 #include <asm/mach/map.h>
 
 #include <mach/tc.h>
-#include <mach/control.h>
 #include <mach/board.h>
 #include <mach/mmc.h>
 #include <mach/mux.h>
 #include <mach/gpio.h>
-#include <mach/menelaus.h>
-#include <mach/mcbsp.h>
 #include <mach/dsp_common.h>
+#include <mach/mcbsp.h>
 
 #if	defined(CONFIG_OMAP_DSP) || defined(CONFIG_OMAP_DSP_MODULE)
 
@@ -90,6 +90,33 @@ EXPORT_SYMBOL(dsp_kfunc_device_register);
 static inline void omap_init_dsp(void) { }
 #endif	/* CONFIG_OMAP_DSP */
 
+#if defined(CONFIG_MPU_BRIDGE) ||  defined(CONFIG_MPU_BRIDGE_MODULE)
+
+static unsigned long dspbridge_phys_mempool_base;
+
+void dspbridge_reserve_sdram(void)
+{
+	void *va;
+	unsigned long size = CONFIG_BRIDGE_MEMPOOL_SIZE;
+
+	if (!size)
+		return;
+
+	va = __alloc_bootmem_nopanic(size, SZ_1M, 0);
+	if (!va) {
+		pr_err("%s: Failed to bootmem allocation(%lu bytes)\n",
+		       __func__, size);
+		return;
+	}
+	dspbridge_phys_mempool_base = virt_to_phys(va);
+}
+
+unsigned long dspbridge_get_mempool_base(void)
+{
+	return dspbridge_phys_mempool_base;
+}
+EXPORT_SYMBOL(dspbridge_get_mempool_base);
+#endif
 /*-------------------------------------------------------------------------*/
 #if	defined(CONFIG_KEYBOARD_OMAP) || defined(CONFIG_KEYBOARD_OMAP_MODULE)
 
@@ -228,6 +255,9 @@ int __init omap_mmc_add(const char *name, int id, unsigned long base,
 	ret = platform_device_add(pdev);
 	if (ret)
 		goto fail;
+
+	/* return device handle to board setup code */
+	data->dev = &pdev->dev;
 	return 0;
 
 fail:
@@ -306,7 +336,7 @@ static void omap_init_wdt(void)
 		wdt_resources[0].start = 0x48022000; /* WDT2 */
 	else if (cpu_is_omap2430())
 		wdt_resources[0].start = 0x49016000; /* WDT2 */
-	else if (cpu_is_omap343x())
+	else if (cpu_is_omap34xx())
 		wdt_resources[0].start = 0x48314000; /* WDT2 */
 	else
 		return;

@@ -16,6 +16,7 @@
 #define __LINUX_REGULATOR_MACHINE_H_
 
 #include <linux/regulator/consumer.h>
+#include <linux/regulator/bq24073.h>
 #include <linux/suspend.h>
 
 struct regulator;

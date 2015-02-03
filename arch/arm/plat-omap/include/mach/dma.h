@@ -144,6 +144,7 @@
 #define OMAP_DMA4_CSSA_U(n)		0
 #define OMAP_DMA4_CDSA_L(n)		0
 #define OMAP_DMA4_CDSA_U(n)		0
+#define OMAP1_DMA_COLOR(n)		0
 
 /*----------------------------------------------------------------------------*/
 
@@ -387,6 +388,21 @@
 #define DMA_THREAD_FIFO_25		(0x02 << 14)
 #define DMA_THREAD_FIFO_50		(0x03 << 14)
 
+/* DMA4_OCP_SYSCONFIG bits */
+#define DMA_SYSCONFIG_MIDLEMODE_MASK		(3 << 12)
+#define DMA_SYSCONFIG_CLOCKACTIVITY_MASK	(3 << 8)
+#define DMA_SYSCONFIG_EMUFREE			(1 << 5)
+#define DMA_SYSCONFIG_SIDLEMODE_MASK		(3 << 3)
+#define DMA_SYSCONFIG_SOFTRESET			(1 << 2)
+#define DMA_SYSCONFIG_AUTOIDLE			(1 << 0)
+
+#define DMA_SYSCONFIG_MIDLEMODE(n)		((n) << 12)
+#define DMA_SYSCONFIG_SIDLEMODE(n)		((n) << 3)
+
+#define DMA_IDLEMODE_SMARTIDLE			0x2
+#define DMA_IDLEMODE_NO_IDLE			0x1
+#define DMA_IDLEMODE_FORCE_IDLE			0x0
+
 /* Chaining modes*/
 #ifndef CONFIG_ARCH_OMAP1
 #define OMAP_DMA_STATIC_CHAIN		0x1
@@ -481,6 +497,7 @@ extern void omap_disable_dma_irq(int ch, u16 irq_bits);
 extern void omap_free_dma(int ch);
 extern void omap_start_dma(int lch);
 extern void omap_stop_dma(int lch);
+extern void omap_disable_lch(int lch);
 extern void omap_set_dma_transfer_params(int lch, int data_type,
 					 int elem_count, int frame_count,
 					 int sync_mode,
@@ -495,6 +512,7 @@ extern void omap_set_dma_src_params(int lch, int src_port, int src_amode,
 				    int src_ei, int src_fi);
 extern void omap_set_dma_src_index(int lch, int eidx, int fidx);
 extern void omap_set_dma_src_data_pack(int lch, int enable);
+extern void omap_set_dma_prefetch(int lch, int enable);
 extern void omap_set_dma_src_burst_mode(int lch,
 					enum omap_dma_burst_mode burst_mode);
 
@@ -519,6 +537,7 @@ extern dma_addr_t omap_get_dma_src_pos(int lch);
 extern dma_addr_t omap_get_dma_dst_pos(int lch);
 extern void omap_clear_dma(int lch);
 extern int omap_get_dma_active_status(int lch);
+extern int omap_get_dma_rd_wr_active_status(int lch);
 extern int omap_dma_running(void);
 extern void omap_dma_set_global_params(int arb_rate, int max_fifo_depth,
 				       int tparams);
@@ -527,6 +546,11 @@ extern int omap_dma_set_prio_lch(int lch, unsigned char read_prio,
 extern void omap_set_dma_dst_endian_type(int lch, enum end_type etype);
 extern void omap_set_dma_src_endian_type(int lch, enum end_type etype);
 extern int omap_get_dma_index(int lch, int *ei, int *fi);
+
+void omap_dma_global_context_save(void);
+void omap_dma_global_context_restore(void);
+
+extern void omap_dma_disable_irq(int lch);
 
 /* Chaining APIs */
 #ifndef CONFIG_ARCH_OMAP1

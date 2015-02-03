@@ -130,6 +130,11 @@ static int soc_pcm_open(struct snd_pcm_substream *substream)
 	struct snd_soc_dai *codec_dai = machine->codec_dai;
 	int ret = 0;
 
+    /* wait for resume to finish - it's running in a workqueue */
+	snd_power_lock(socdev->codec->card);
+	snd_power_wait(socdev->codec->card, SNDRV_CTL_POWER_D0);
+	snd_power_unlock(socdev->codec->card);
+
 	mutex_lock(&pcm_mutex);
 
 	/* startup the audio subsystem */
@@ -1324,6 +1329,7 @@ int snd_soc_new_pcms(struct snd_soc_device *socdev, int idx, const char *xid)
 		return -ENODEV;
 	}
 
+	codec->socdev = socdev;
 	codec->card->dev = socdev->dev;
 	codec->card->private_data = codec;
 	strncpy(codec->card->driver, codec->name, sizeof(codec->card->driver));

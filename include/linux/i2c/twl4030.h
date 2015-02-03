@@ -152,6 +152,20 @@ int twl4030_i2c_read(u8 mod_no, u8 *value, u8 reg, unsigned num_bytes);
 
 /*----------------------------------------------------------------------*/
 
+/* Iterface Bit Register (INTBR) offsets
+ * (use TWL4030_MODULE_INTBR)
+ */
+
+#define REG_GPPUPDCTR1			0x0F
+
+/* I2C1 and I2C4(SR) SDA/SCL pull-up control bits */
+
+#define I2C_SCL_CTRL_PU 		(1 << 0)
+#define I2C_SDA_CTRL_PU 		(1 << 2)
+#define SR_I2C_SCL_CTRL_PU		(1 << 4)
+#define SR_I2C_SDA_CTRL_PU		(1 << 6)
+/*----------------------------------------------------------------------*/
+
 /*
  * Keypad register offsets (use TWL4030_MODULE_KEYPAD)
  * ... SIH/interrupt only
@@ -218,9 +232,101 @@ int twl4030_i2c_read(u8 mod_no, u8 *value, u8 reg, unsigned num_bytes);
 
 /*----------------------------------------------------------------------*/
 
+/* Power bus message definitions */
+
+#define DEV_GRP_NULL		0x0
+#define DEV_GRP_P1		0x1
+#define DEV_GRP_P2		0x2
+#define DEV_GRP_P3		0x4
+#define DEV_GRP_ALL		0x7     /* P1/P2/P3: all devices */
+
+#define RES_GRP_RES		0x0
+#define RES_GRP_PP		0x1
+#define RES_GRP_RC		0x2
+#define RES_GRP_PP_RC		0x3
+#define RES_GRP_PR		0x4
+#define RES_GRP_PP_PR		0x5
+#define RES_GRP_RC_PR		0x6
+#define RES_GRP_ALL		0x7
+
+#define RES_TYPE2_R0		0x0
+#define RES_TYPE2_R1		0x1
+#define RES_TYPE2_R2		0x2
+
+#define RES_TYPE_R0		0x0
+
+#define RES_TYPE_ALL		0x7
+
+#define RES_STATE_WRST		0xF
+#define RES_STATE_ACTIVE	0xE
+#define RES_STATE_SLEEP		0x8
+#define RES_STATE_OFF		0x0
+
+/* Power resources */
+
+#define RES_VAUX1               1
+#define RES_VAUX2               2
+#define RES_VAUX3               3
+#define RES_VAUX4               4
+#define RES_VMMC1               5
+#define RES_VMMC2               6
+#define RES_VPLL1               7
+#define RES_VPLL2               8
+#define RES_VSIM                9
+#define RES_VDAC                10
+#define RES_VINTANA1            11
+#define RES_VINTANA2            12
+#define RES_VINTDIG             13
+#define RES_VIO                 14
+#define RES_VDD1                15
+#define RES_VDD2                16
+#define RES_VUSB_1V5            17
+#define RES_VUSB_1V8            18
+#define RES_VUSB_3V1            19
+#define RES_VUSBCP              20
+#define RES_REGEN               21
+#define RES_NRES_PWRON          22
+#define RES_CLKEN               23
+#define RES_SYSEN               24
+#define RES_HFCLKOUT            25
+#define RES_32KCLKOUT           26
+#define RES_RESET               27
+#define RES_Main_Ref            28
+
+#define TOTAL_RESOURCES		28
+/*
+ * Power Bus Message Format ... these can be sent individually by Linux,
+ * but are usually part of downloaded scripts that are run when various
+ * power events are triggered.
+ *
+ *  Broadcast Message (16 Bits):
+ *    DEV_GRP[15:13] MT[12]  RES_GRP[11:9]  RES_TYPE2[8:7] RES_TYPE[6:4]
+ *    RES_STATE[3:0]
+ *
+ *  Singular Message (16 Bits):
+ *    DEV_GRP[15:13] MT[12]  RES_ID[11:4]  RES_STATE[3:0]
+ */
+
+#define MSG_BROADCAST(devgrp, grp, type, type2, state) \
+	((devgrp) << 13 | 1 << 12 | (grp) << 9 | (type2) << 7 \
+	| (type) << 4 | (state))
+
+#define MSG_SINGULAR(devgrp, id, state) \
+	((devgrp) << 13 | 0 << 12 | (id) << 4 | (state))
+
+#define MSG_BROADCAST_ALL(devgrp, state) \
+	((devgrp) << 5 | (state))
+
+#define MSG_BROADCAST_REF MSG_BROADCAST_ALL
+#define MSG_BROADCAST_PROV MSG_BROADCAST_ALL
+#define MSG_BROADCAST__CLK_RST MSG_BROADCAST_ALL
+
+/*----------------------------------------------------------------------*/
+
 struct twl4030_bci_platform_data {
 	int *battery_tmp_tbl;
 	unsigned int tblsize;
+	int twl4030_bci_charging_current; /* BCI charging current in mA */
 };
 
 /* TWL4030_GPIO_MAX (18) GPIOs, with interrupts */
@@ -255,12 +361,19 @@ struct twl4030_madc_platform_data {
 	int		irq_line;
 };
 
+/* Boards have uniqe mappings of {col, row} --> keycode.
+ * Column and row are 4 bits, but range only from 0..7;
+ * a PERSISTENT_KEY is "always on" and never reported.
+ */
+#define KEY_PERSISTENT		0x00800000
+#define KEY(col, row, keycode)	(((col) << 28) | ((row) << 24) | (keycode))
+#define PERSISTENT_KEY(c, r)	KEY(c, r, KEY_PERSISTENT)
+
 struct twl4030_keypad_data {
-	int rows;
-	int cols;
-	int *keymap;
-	int irq;
-	unsigned int keymapsize;
+	unsigned rows;
+	unsigned cols;
+	unsigned *keymap;
+	unsigned short keymapsize;
 	unsigned int rep:1;
 };
 
@@ -271,7 +384,44 @@ enum twl4030_usb_mode {
 
 struct twl4030_usb_data {
 	enum twl4030_usb_mode	usb_mode;
+	struct regulator_consumer_supply *bci_supply;
 };
+
+struct twl4030_ins {
+	u16 pmb_message;
+	u8 delay;
+};
+
+struct twl4030_script {
+	struct twl4030_ins *script;
+	unsigned size;
+	u8 flags;
+#define TRITON_WRST_SCRIPT	(1<<0)
+#define TRITON_WAKEUP12_SCRIPT	(1<<1)
+#define TRITON_WAKEUP3_SCRIPT	(1<<2)
+#define TRITON_SLEEP_SCRIPT	(1<<3)
+};
+
+struct twl4030_resconfig {
+	u8 resource;
+	u8 devgroup;
+	u8 type;
+	u8 type2;
+	u8 remap_off;	/* off state remapping */
+	u8 remap_sleep;	/* sleep state remapping */
+};
+
+struct twl4030_power_data {
+	struct twl4030_script **scripts;
+	unsigned size;
+	const struct twl4030_resconfig *resource_config;
+#define TWL4030_RESCONFIG_UNDEF ((u8)-1)
+};
+
+extern bool twl_rev_is_tps65921(void);
+
+extern int twl4030_add_sleep_script(void);
+extern int twl4030_remove_script(u8 flags);
 
 struct twl4030_platform_data {
 	unsigned				irq_base, irq_end;
@@ -280,6 +430,7 @@ struct twl4030_platform_data {
 	struct twl4030_madc_platform_data	*madc;
 	struct twl4030_keypad_data		*keypad;
 	struct twl4030_usb_data			*usb;
+	struct twl4030_power_data		*power;
 
 	/* LDO regulators */
 	struct regulator_init_data		*vdac;
@@ -309,7 +460,8 @@ int twl4030_sih_setup(int module);
 #define TWL4030_VAUX2_DEDICATED		0x1E
 #define TWL4030_VAUX3_DEV_GRP		0x1F
 #define TWL4030_VAUX3_DEDICATED		0x22
-
+#define TWL4030_VAUX4_DEV_GRP		0x23
+#define TWL4030_VAUX4_DEDICATED		0x26
 
 #if defined(CONFIG_TWL4030_BCI_BATTERY) || \
 	defined(CONFIG_TWL4030_BCI_BATTERY_MODULE)

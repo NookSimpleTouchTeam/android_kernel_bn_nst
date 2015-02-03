@@ -37,6 +37,7 @@
 #include <asm/mach-types.h>
 #include <mach/hardware.h>
 #include <mach/mux.h>
+#include <mach/omap-pm.h>
 
 #include "musb_core.h"
 #include "omap2430.h"
@@ -48,6 +49,10 @@
 #define MUSB_TIMEOUT_A_WAIT_BCON	1100
 
 static struct timer_list musb_idle_timer;
+
+void musb_link_save_context(struct otg_transceiver *xceiv);
+void musb_link_restore_context(struct otg_transceiver *xceiv);
+void musb_link_force_active(int on);
 
 static void musb_do_idle(unsigned long _musb)
 {
@@ -226,22 +231,53 @@ int musb_platform_set_mode(struct musb *musb, u8 musb_mode)
 
 int __init musb_platform_init(struct musb *musb)
 {
+	struct otg_transceiver *x = otg_get_transceiver();
 	u32 l;
 
 #if defined(CONFIG_ARCH_OMAP2430)
 	omap_cfg_reg(AE5_2430_USB0HS_STP);
 #endif
 
+	/* Reset controller */
+	if (musb->set_clock)
+		musb->set_clock(musb->clock, 1);
+	else
+		clk_enable(musb->clock);
+	l = omap_readl(OTG_SYSCONFIG);
+	l |= SOFTRST;
+	omap_writel(l, OTG_SYSCONFIG);
+	while (!(RESETDONE & omap_readl(OTG_SYSSTATUS)))
+		cpu_relax();
+
+	musb->xceiv = *x;
 	musb_platform_resume(musb);
 
 	l = omap_readl(OTG_SYSCONFIG);
-	l &= ~ENABLEWAKEUP;	/* disable wakeup */
-	l &= ~NOSTDBY;		/* remove possible nostdby */
-	l |= SMARTSTDBY;	/* enable smart standby */
-	l &= ~AUTOIDLE;		/* disable auto idle */
-	l &= ~NOIDLE;		/* remove possible noidle */
-	l |= SMARTIDLE;		/* enable smart idle */
-	l |= AUTOIDLE;		/* enable auto idle */
+	if (cpu_is_omap3630()) {
+		/*
+		* Do Forcestdby here, for the case when kernel boots up
+		 * without cable attached, force_active(0) won't be called.
+		 */
+		l |= ENABLEWAKEUP;	/* Enable wakeup */
+		l &= ~NOSTDBY;		/* remove possible nostdby */
+		l |= FORCESTDBY;	/* enable force standby */
+		l &= ~AUTOIDLE;		/* disable auto idle */
+		l &= ~NOIDLE;		/* remove possible noidle */
+		l |= FORCEIDLE;		/* enable force idle */
+	} else {
+		l &= ~ENABLEWAKEUP;	/* disable wakeup */
+		l &= ~NOSTDBY;		/* remove possible nostdby */
+		l |= SMARTSTDBY;	/* enable smart standby */
+		l &= ~AUTOIDLE;		/* disable auto idle */
+		l &= ~NOIDLE;		/* remove possible noidle */
+		l |= SMARTIDLE;		/* enable smart idle */
+	}
+	/*
+	 * MUSB AUTOIDLE don't work in 3430.
+	 * Workaround by Richard Woodruff/TI
+	 */
+	if (!(cpu_is_omap3430()))
+		l |= AUTOIDLE;		/* enable auto idle */
 	omap_writel(l, OTG_SYSCONFIG);
 
 	l = omap_readl(OTG_INTERFSEL);
@@ -258,14 +294,296 @@ int __init musb_platform_init(struct musb *musb)
 
 	if (is_host_enabled(musb))
 		musb->board_set_vbus = omap_set_vbus;
-	if (is_peripheral_enabled(musb))
+	if (!musb->xceiv.set_power && is_peripheral_enabled(musb))
 		musb->xceiv.set_power = omap_set_power;
 	musb->a_wait_bcon = MUSB_TIMEOUT_A_WAIT_BCON;
+
+	x->link_save_context = musb_link_save_context;
+	x->link_restore_context = musb_link_restore_context;
+	x->link_force_active = musb_link_force_active;
+	x->link = musb;
+    x->gadget = &musb->g;
+
+	otg_put_transceiver(x);
 
 	setup_timer(&musb_idle_timer, musb_do_idle, (unsigned long) musb);
 
 	return 0;
 }
+
+#ifdef	CONFIG_PM
+
+struct musb_csr_regs {
+	/* FIFO registers */
+	u16 txmaxp, txcsr, rxmaxp, rxcsr, rxcount;
+	u16 rxfifoadd, txfifoadd;
+	u8 txtype, txinterval, rxtype, rxinterval;
+	u8 rxfifosz, txfifosz;
+};
+
+static struct musb_context_registers {
+
+	u32 off_counter;
+	u32 otg_sysconfig, otg_forcestandby;
+
+	u8 faddr, power;
+	u16 intrtx, intrrx, intrtxe, intrrxe;
+	u8 intrusb, intrusbe;
+	u16 frame;
+	u8 index, testmode;
+
+	u8 devctl, misc;
+
+	struct musb_csr_regs index_regs[MUSB_C_NUM_EPS];
+
+} musb_context;
+
+void musb_platform_save_context(struct musb *musb)
+{
+	int i;
+	struct musb_hdrc_platform_data *plat = musb->controller->platform_data;
+
+	DBG(4, "Saving musb_registers\n");
+
+	musb_context.off_counter =
+			plat->context_loss_counter(musb->controller);
+
+	musb_context.otg_sysconfig = omap_readl(OTG_SYSCONFIG);
+	musb_context.otg_forcestandby = omap_readl(OTG_FORCESTDBY);
+
+	musb_context.faddr = musb_readb(musb->mregs, MUSB_FADDR);
+	musb_context.power = musb_readb(musb->mregs, MUSB_POWER);
+	musb_context.intrtx = musb_readw(musb->mregs, MUSB_INTRTX);
+	musb_context.intrrx = musb_readw(musb->mregs, MUSB_INTRRX);
+	musb_context.intrtxe = musb_readw(musb->mregs, MUSB_INTRTXE);
+	musb_context.intrrxe = musb_readw(musb->mregs, MUSB_INTRRXE);
+	musb_context.intrusb = musb_readb(musb->mregs, MUSB_INTRUSB);
+	musb_context.intrusbe = musb_readb(musb->mregs, MUSB_INTRUSBE);
+	musb_context.frame = musb_readw(musb->mregs, MUSB_FRAME);
+	musb_context.index = musb_readb(musb->mregs, MUSB_INDEX);
+	musb_context.testmode = musb_readb(musb->mregs, MUSB_TESTMODE);
+
+	musb_context.devctl = musb_readb(musb->mregs, MUSB_DEVCTL);
+
+	for (i = 0; i < MUSB_C_NUM_EPS; ++i) {
+		musb_writeb(musb->mregs, MUSB_INDEX, i);
+		musb_context.index_regs[i].txmaxp =
+			musb_readw(musb->mregs, 0x10 + MUSB_TXMAXP);
+		musb_context.index_regs[i].txcsr =
+			musb_readw(musb->mregs, 0x10 + MUSB_TXCSR);
+		musb_context.index_regs[i].rxmaxp =
+			musb_readw(musb->mregs, 0x10 + MUSB_RXMAXP);
+		musb_context.index_regs[i].rxcsr =
+			musb_readw(musb->mregs, 0x10 + MUSB_RXCSR);
+		musb_context.index_regs[i].rxcount =
+			musb_readw(musb->mregs, 0x10 + MUSB_RXCOUNT);
+		musb_context.index_regs[i].txtype =
+			musb_readb(musb->mregs, 0x10 + MUSB_TXTYPE);
+		musb_context.index_regs[i].txinterval =
+			musb_readb(musb->mregs, 0x10 + MUSB_TXINTERVAL);
+		musb_context.index_regs[i].rxtype =
+			musb_readb(musb->mregs, 0x10 + MUSB_RXTYPE);
+		musb_context.index_regs[i].rxinterval =
+			musb_readb(musb->mregs, 0x10 + MUSB_RXINTERVAL);
+
+		musb_context.index_regs[i].txfifoadd =
+			musb_readw(musb->mregs, MUSB_TXFIFOADD);
+		musb_context.index_regs[i].rxfifoadd =
+			musb_readw(musb->mregs, MUSB_RXFIFOADD);
+		musb_context.index_regs[i].txfifosz =
+			musb_readw(musb->mregs, MUSB_TXFIFOSZ);
+		musb_context.index_regs[i].rxfifosz =
+			musb_readw(musb->mregs, MUSB_RXFIFOSZ);
+	}
+
+	musb_writeb(musb->mregs, MUSB_INDEX,
+				musb_context.index);
+
+}
+
+void musb_platform_restore_context(struct musb *musb)
+{
+	int i;
+
+	DBG(4, "Restoring musb_registers\n");
+
+	musb_writeb(musb->mregs, MUSB_FADDR,
+				musb_context.faddr);
+	musb_writeb(musb->mregs, MUSB_POWER,
+				musb_context.power);
+	musb_writew(musb->mregs, MUSB_INTRTX,
+				musb_context.intrtx);
+	musb_writew(musb->mregs, MUSB_INTRRX,
+				musb_context.intrrx);
+	musb_writew(musb->mregs, MUSB_INTRTXE,
+				musb_context.intrtxe);
+	musb_writew(musb->mregs, MUSB_INTRRXE,
+				musb_context.intrrxe);
+	musb_writeb(musb->mregs, MUSB_INTRUSB,
+				musb_context.intrusb);
+	musb_writeb(musb->mregs, MUSB_INTRUSBE,
+				musb_context.intrusbe);
+	musb_writew(musb->mregs, MUSB_FRAME,
+				musb_context.frame);
+	musb_writeb(musb->mregs, MUSB_TESTMODE,
+				musb_context.testmode);
+	musb_writeb(musb->mregs, MUSB_DEVCTL,
+				musb_context.devctl);
+
+
+	for (i = 0; i < MUSB_C_NUM_EPS; ++i) {
+		musb_writeb(musb->mregs, MUSB_INDEX, i);
+		musb_writew(musb->mregs, 0x10 + MUSB_TXMAXP,
+			musb_context.index_regs[i].txmaxp);
+		musb_writew(musb->mregs, 0x10 + MUSB_TXCSR,
+			musb_context.index_regs[i].txcsr);
+		musb_writew(musb->mregs, 0x10 + MUSB_RXMAXP,
+			musb_context.index_regs[i].rxmaxp);
+		musb_writew(musb->mregs, 0x10 + MUSB_RXCSR,
+			musb_context.index_regs[i].rxcsr);
+		musb_writew(musb->mregs, 0x10 + MUSB_RXCOUNT,
+			musb_context.index_regs[i].rxcount);
+		musb_writeb(musb->mregs, 0x10 + MUSB_TXTYPE,
+			musb_context.index_regs[i].txtype);
+		musb_writeb(musb->mregs, 0x10 + MUSB_TXINTERVAL,
+			musb_context.index_regs[i].txinterval);
+		musb_writeb(musb->mregs, 0x10 + MUSB_RXTYPE,
+			musb_context.index_regs[i].rxtype);
+		musb_writeb(musb->mregs, 0x10 + MUSB_RXINTERVAL,
+			musb_context.index_regs[i].rxinterval);
+
+		musb_writew(musb->mregs, MUSB_TXFIFOSZ,
+			musb_context.index_regs[i].txfifosz);
+		musb_writew(musb->mregs, MUSB_RXFIFOSZ,
+			musb_context.index_regs[i].rxfifosz);
+		musb_writew(musb->mregs, MUSB_TXFIFOADD,
+			musb_context.index_regs[i].txfifoadd);
+		musb_writew(musb->mregs, MUSB_RXFIFOADD,
+			musb_context.index_regs[i].rxfifoadd);
+	}
+
+	musb_writeb(musb->mregs, MUSB_INDEX,
+				musb_context.index);
+#if defined(CONFIG_MACH_OMAP3621_EVT1A) || defined(CONFIG_MACH_OMAP3621_GOSSAMER)
+#else
+	// For Encore & Gossamer this is resumed via the link_state callback
+	// triggered by the twl4030 VBUS interrupt
+	omap_writel(musb_context.otg_sysconfig, OTG_SYSCONFIG);
+	omap_writel(musb_context.otg_forcestandby, OTG_FORCESTDBY);
+#endif
+}
+
+void musb_link_save_context(struct otg_transceiver *xceiv)
+{
+	struct musb	*musb = xceiv->link;
+	struct musb_hdrc_platform_data *plat =
+			musb->controller->platform_data;
+
+	musb_platform_save_context(musb);
+
+	/* On cable detach remove restriction on CORE domain:
+	 * Now core domain can go to off
+	 */
+	omap_pm_set_max_mpu_wakeup_lat(musb->controller, -1);
+
+	/* Initialize vdd1 to min opp1 constraint  */
+	if (plat->set_vdd1_opp)
+		plat->set_vdd1_opp(musb->controller, plat->min_vdd1_opp);
+}
+
+void musb_link_restore_context(struct otg_transceiver *xceiv)
+{
+	struct musb	*musb = xceiv->link;
+	struct musb_hdrc_platform_data *plat =
+			musb->controller->platform_data;
+
+	/* MUSB has no h/w SAR: So restrict CORE domain
+	 * from going to OFF mode
+	 * So prevent CPUIdle going to C7, restrict to C6
+	 */
+	omap_pm_set_max_mpu_wakeup_lat(musb->controller, 6250);
+
+	/* Initialize vdd1 to max opp1 constraint  */
+	if (plat->set_vdd1_opp)
+		plat->set_vdd1_opp(musb->controller, plat->max_vdd1_opp);
+
+	/* No context restore needed in case
+	 * OFF transition has not happened
+	 */
+	if (musb_context.off_counter ==
+		plat->context_loss_counter(musb->controller)) {
+		DBG(4,"No context was lost. Not restoring.\n");
+		return;
+	}
+
+	musb_platform_restore_context(musb);
+}
+
+void musb_link_force_active(int enable)
+{
+	u32 l;
+
+	l = omap_readl(OTG_SYSCONFIG);
+
+	/*
+	 * We have encountered enumeration problems on the omap3
+	 * when power management has been enabled and the device
+	 * is transitioning in and out of CORE retention. To
+	 * workaround this problem, we force the musb controller
+	 * to be always active (no idle/standby) when the usb
+	 * cable is attached and inactive (smart idle/standby)
+	 * when the cable is removed.
+	 */
+	if (enable) {
+		l &= ~SMARTSTDBY;	/* disable smart standby */
+		l |= NOSTDBY;		/* enable nostdby */
+		l &= ~SMARTIDLE;	/* disable smart idle */
+		l |= NOIDLE;		/* enable noidle */
+		if (cpu_is_omap3630())
+			/* Disable Mstandby */
+			omap_writel((omap_readl(OTG_FORCESTDBY) & ~ENABLEFORCE),
+					 OTG_FORCESTDBY);
+	} else {
+		if (cpu_is_omap3630()) {
+			/*
+			 * When the device is disconnected put the OTG to
+			 * Forceidle and Forcestdby. There where known issues
+			 * on different custom boards, wherein
+			 * the OTG idle ack was broken. May be the OTG senses
+			 * some fake activity on the lines.
+			 * Also, this might be moved to suspend/resume hooks.
+			 * Right now, musb doesn't have suspend/resume hooks
+			 * plugged in to LDM. REVISIT: Seen only on 3630.
+			 */
+			l |= ENABLEWAKEUP;	/* Enable wakeup */
+			l &= ~SMARTSTDBY;	/* enable smart standby */
+			l |= FORCESTDBY;
+			l &= ~NOSTDBY;		/* disable nostdby */
+			l |= FORCEIDLE;
+			l &= ~NOIDLE;		/* disable noidle */
+
+			/* Enable Mstdby */
+			omap_writel((omap_readl(OTG_FORCESTDBY) | ENABLEFORCE),
+					 OTG_FORCESTDBY);
+		} else {
+			l &= ~NOSTDBY;		/* disable nostdby */
+			l |= SMARTIDLE;		/* enable smart idle */
+			l &= ~NOIDLE;		/* disable noidle */
+		}
+	}
+
+	omap_writel(l, OTG_SYSCONFIG);
+}
+
+#else
+
+#define musb_platform_save_context	do {} while (0)
+#define musb_platform_restore_context	do {} while (0)
+#define musb_link_save_context	do {} while (0)
+#define musb_link_restore_context	do {} while (0)
+#define musb_link_force_active	do {} while (0)
+
+#endif
 
 int musb_platform_suspend(struct musb *musb)
 {
@@ -323,6 +641,7 @@ static int musb_platform_resume(struct musb *musb)
 
 int musb_platform_exit(struct musb *musb)
 {
+	struct otg_transceiver *x = otg_get_transceiver();
 
 	omap_vbus_power(musb, 0 /*off*/, 1);
 
@@ -330,6 +649,12 @@ int musb_platform_exit(struct musb *musb)
 
 	clk_put(musb->clock);
 	musb->clock = 0;
+
+	x->link_save_context = NULL;
+	x->link_restore_context = NULL;
+	x->link = NULL;
+
+	otg_put_transceiver(x);
 
 	return 0;
 }

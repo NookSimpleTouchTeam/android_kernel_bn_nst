@@ -106,6 +106,36 @@ config TWL4030_CORE
 	  high speed USB OTG transceiver, an audio codec (on most
 	  versions) and many other features.
 
+config TWL4030_POWER
+	bool "Support power resources on TWL4030 family chips"
+	depends on TWL4030_CORE
+	help
+	  Say yes here if you want to use the power resources on the
+	  TWL4030 family chips.  Most of these resources are regulators,
+	  which have a separate driver; some are control signals, such
+	  as clock request handshaking.
+
+	  This driver uses board-specific data to initialize the resources
+	  and load scripts controling which resources are switched off/on
+	  or reset when a sleep, wakeup or warm reset event occurs.
+
+config TWL4030_POWER_STOPON
+	bool "Support power button stop-off by default on TWL4030 family chips"
+	depends on TWL4030_POWER
+	help
+	  Say yes here if you want to use enable a power button press greater
+	  than 8 seconds to turn off the device on the TWL4030 family chips.  
+	  Note that system is not shut down gracefully.
+
+
+config TWL4030_BTN_STOPOFF
+	bool "Support power button stop-off on TWL4030 family chips"
+	depends on TWL4030_CORE
+	help
+	  Say yes here if you want to use enable a power button press greater
+	  than 8 seconds to turn off the device on the TWL4030 family chips.  
+	  Note that system is not shut down gracefully. Sysfs entry to control this feature.
+
 config MFD_TMIO
 	bool
 	default n

@@ -75,8 +75,10 @@ static void cpuidle_idle_call(void)
 #endif
 	/* ask the governor for the next state */
 	next_state = cpuidle_curr_governor->select(dev);
-	if (need_resched())
+	if (need_resched()) {
+		local_irq_enable();
 		return;
+	}
 	target_state = &dev->states[next_state];
 
 	/* enter the state and update stats */
@@ -175,6 +177,7 @@ int cpuidle_enable_device(struct cpuidle_device *dev)
 	}
 	dev->last_residency = 0;
 	dev->last_state = NULL;
+	dev->max_state = dev->state_count;
 
 	smp_wmb();
 
@@ -321,7 +324,15 @@ void cpuidle_unregister_device(struct cpuidle_device *dev)
 {
 	struct sys_device *sys_dev = get_cpu_sysdev((unsigned long)dev->cpu);
 
+	if (!sys_dev) {
+		pr_err(" ERR get_cpu_sysdev returned NULL\n");
+		return;
+	}
+
 	if (dev->registered == 0)
+		return;
+
+	if (!sys_dev)
 		return;
 
 	cpuidle_pause_and_lock();

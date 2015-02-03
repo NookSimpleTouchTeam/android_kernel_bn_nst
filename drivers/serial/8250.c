@@ -1596,7 +1596,11 @@ static irqreturn_t serial8250_interrupt(int irq, void *dev_id)
 
 	DEBUG_INTR("end.\n");
 
+#ifdef CONFIG_ARCH_OMAP15XX
+	return IRQ_HANDLED;	/* FIXME: iir status not ready on 1510 */
+#else
 	return IRQ_RETVAL(handled);
+#endif
 }
 
 /*
@@ -1666,6 +1670,9 @@ static int serial_link_irq_chain(struct uart_8250_port *up)
 		INIT_LIST_HEAD(&up->list);
 		i->head = &up->list;
 		spin_unlock_irq(&i->lock);
+
+		if (up->port.flags & UPF_TRIGGER_HIGH)
+			irq_flags |= IRQF_TRIGGER_HIGH;
 
 		ret = request_irq(up->port.irq, serial8250_interrupt,
 				  irq_flags, "serial", i);
@@ -2387,6 +2394,19 @@ serial8250_set_termios(struct uart_port *port, struct ktermios *termios,
 			/* emulated UARTs (Lucent Venus 167x) need two steps */
 			serial_outp(up, UART_FCR, UART_FCR_ENABLE_FIFO);
 		}
+
+		/* Note that we need to set ECB to access write water mark
+		 * bits. First allow FCR tx fifo write, then set fcr with
+		 * possible TX fifo settings. */
+		if (uart_config[up->port.type].flags & UART_CAP_EFR) {
+			serial_outp(up, UART_LCR, 0xbf);	/* Access EFR */
+			serial_outp(up, UART_EFR, UART_EFR_ECB);
+			serial_outp(up, UART_LCR, 0x0);		/* Access FCR */
+			serial_outp(up, UART_FCR, fcr);
+			serial_outp(up, UART_LCR, 0xbf);	/* Access EFR */
+			serial_outp(up, UART_EFR, 0);
+			serial_outp(up, UART_LCR, cval);	/* Access FCR */
+        } else
 		serial_outp(up, UART_FCR, fcr);		/* set fcr */
 	}
 	serial8250_set_mctrl(&up->port, up->port.mctrl);
@@ -3081,8 +3101,13 @@ int serial8250_register_port(struct uart_port *port)
 		uart->port.flags        = port->flags | UPF_BOOT_AUTOCONF;
 		uart->port.mapbase      = port->mapbase;
 		uart->port.private_data = port->private_data;
-		if (port->dev)
+		if (port->dev) {
+			struct plat_serial8250_port *p =
+				port->dev->platform_data;
 			uart->port.dev = port->dev;
+			if (p)
+				uart->pm = p->pm;
+		}
 
 		if (port->flags & UPF_FIXED_TYPE) {
 			uart->port.type = port->type;

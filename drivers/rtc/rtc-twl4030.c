@@ -188,8 +188,10 @@ static int twl4030_rtc_update_irq_enable(struct device *dev, unsigned enabled)
 static int twl4030_rtc_read_time(struct device *dev, struct rtc_time *tm)
 {
 	unsigned char rtc_data[ALL_TIME_REGS + 1];
-	int ret;
-	u8 save_control;
+	int ret, i;
+	u8 uninitialized_var(save_control);
+
+	memset(rtc_data, 0, (ALL_TIME_REGS + 1));
 
 	ret = twl4030_rtc_read_u8(&save_control, REG_RTC_CTRL_REG);
 	if (ret < 0)
@@ -201,12 +203,14 @@ static int twl4030_rtc_read_time(struct device *dev, struct rtc_time *tm)
 	if (ret < 0)
 		return ret;
 
-	ret = twl4030_i2c_read(TWL4030_MODULE_RTC, rtc_data,
-			       REG_SECONDS_REG, ALL_TIME_REGS);
+	for(i = 0; i < ALL_TIME_REGS; i++)
+	{
+		ret = twl4030_i2c_read(TWL4030_MODULE_RTC, &rtc_data[i], REG_SECONDS_REG + i, 1);
 
-	if (ret < 0) {
-		dev_err(dev, "rtc_read_time error %d\n", ret);
-		return ret;
+		if (ret < 0) {
+			dev_err(dev, "rtc_read_time error %d at i=%d\n", ret, i);
+			return ret;
+		}
 	}
 
 	tm->tm_sec = bcd2bin(rtc_data[0]);
@@ -221,9 +225,11 @@ static int twl4030_rtc_read_time(struct device *dev, struct rtc_time *tm)
 
 static int twl4030_rtc_set_time(struct device *dev, struct rtc_time *tm)
 {
-	unsigned char save_control;
+	unsigned char uninitialized_var(save_control);
 	unsigned char rtc_data[ALL_TIME_REGS + 1];
 	int ret;
+
+	memset(rtc_data, 0, (ALL_TIME_REGS + 1));
 
 	rtc_data[1] = bin2bcd(tm->tm_sec);
 	rtc_data[2] = bin2bcd(tm->tm_min);
@@ -266,7 +272,9 @@ static int twl4030_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alm)
 	unsigned char rtc_data[ALL_TIME_REGS + 1];
 	int ret;
 
-	ret = twl4030_i2c_read(TWL4030_MODULE_RTC, rtc_data,
+	memset(rtc_data, 0, (ALL_TIME_REGS + 1));
+
+        ret = twl4030_i2c_read(TWL4030_MODULE_RTC, rtc_data,
 			       REG_ALARM_SECONDS_REG, ALL_TIME_REGS);
 	if (ret < 0) {
 		dev_err(dev, "rtc_read_alarm error %d\n", ret);
@@ -323,7 +331,7 @@ static irqreturn_t twl4030_rtc_interrupt(int irq, void *rtc)
 	unsigned long events = 0;
 	int ret = IRQ_NONE;
 	int res;
-	u8 rd_reg;
+	u8 uninitialized_var(rd_reg);
 
 #ifdef CONFIG_LOCKDEP
 	/* WORKAROUND for lockdep forcing IRQF_DISABLED on us, which
@@ -392,7 +400,7 @@ static int __devinit twl4030_rtc_probe(struct platform_device *pdev)
 	struct rtc_device *rtc;
 	int ret = 0;
 	int irq = platform_get_irq(pdev, 0);
-	u8 rd_reg;
+	u8 uninitialized_var(rd_reg);
 
 	if (irq <= 0)
 		return -EINVAL;
@@ -484,6 +492,11 @@ static void twl4030_rtc_shutdown(struct platform_device *pdev)
 {
 	/* mask timer interrupts, but leave alarm interrupts on to enable
 	   power-on when alarm is triggered */
+#ifdef CONFIG_MACH_OMAP3621_GOSSAMER
+    /* in case of gossamer, disable alarm as well */
+    mask_rtc_irq_bit(BIT_RTC_INTERRUPTS_REG_IT_ALARM_M);
+#endif
+
 	mask_rtc_irq_bit(BIT_RTC_INTERRUPTS_REG_IT_TIMER_M);
 }
 
@@ -495,9 +508,7 @@ static int twl4030_rtc_suspend(struct platform_device *pdev, pm_message_t state)
 {
 	irqstat = rtc_irq_bits;
 
-	/* REVISIT alarm may need to wake us from sleep */
-	mask_rtc_irq_bit(BIT_RTC_INTERRUPTS_REG_IT_TIMER_M |
-			 BIT_RTC_INTERRUPTS_REG_IT_ALARM_M);
+	mask_rtc_irq_bit(BIT_RTC_INTERRUPTS_REG_IT_TIMER_M);
 	return 0;
 }
 

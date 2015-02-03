@@ -34,8 +34,7 @@ static const struct snd_pcm_hardware omap_pcm_hardware = {
 	.info			= SNDRV_PCM_INFO_MMAP |
 				  SNDRV_PCM_INFO_MMAP_VALID |
 				  SNDRV_PCM_INFO_INTERLEAVED |
-				  SNDRV_PCM_INFO_PAUSE |
-				  SNDRV_PCM_INFO_RESUME,
+				  SNDRV_PCM_INFO_PAUSE,
 	.formats		= SNDRV_PCM_FMTBIT_S16_LE,
 	.period_bytes_min	= 32,
 	.period_bytes_max	= 64 * 1024,
@@ -72,7 +71,6 @@ static void omap_pcm_dma_irq(int ch, u16 stat, void *data)
 		}
 		spin_unlock_irqrestore(&prtd->lock, flags);
 	}
-
 	snd_pcm_period_elapsed(substream);
 }
 
@@ -86,8 +84,10 @@ static int omap_pcm_hw_params(struct snd_pcm_substream *substream,
 	struct omap_pcm_dma_data *dma_data = rtd->dai->cpu_dai->dma_data;
 	int err = 0;
 
+	/* return if this is a bufferless transfer e.g.
+	 * codec <--> BT codec or GSM modem -- lg FIXME */
 	if (!dma_data)
-		return -ENODEV;
+		return 0;
 
 	snd_pcm_set_runtime_buffer(substream, &substream->dma_buffer);
 	runtime->dma_bytes = params_buffer_bytes(params);
@@ -133,6 +133,11 @@ static int omap_pcm_prepare(struct snd_pcm_substream *substream)
 	struct omap_pcm_dma_data *dma_data = prtd->dma_data;
 	struct omap_dma_channel_params dma_params;
 
+	/* return if this is a bufferless transfer e.g.
+	 * codec <--> BT codec or GSM modem -- lg FIXME */
+	if (!prtd->dma_data)
+		return 0;
+
 	memset(&dma_params, 0, sizeof(dma_params));
 	/*
 	 * Note: Regardless of interface data formats supported by OMAP McBSP
@@ -148,6 +153,17 @@ static int omap_pcm_prepare(struct snd_pcm_substream *substream)
 		dma_params.src_start		= runtime->dma_addr;
 		dma_params.dst_start		= dma_data->port_addr;
 		dma_params.dst_port		= OMAP_DMA_PORT_MPUI;
+		if (dma_data->dma_word_size == 32) {
+			printk(KERN_DEBUG "playback: 32 bit wordsize, xsize=%d\n",
+				dma_data->xfer_size);
+			if (dma_data->xfer_size != 0) {
+				dma_params.sync_mode	= OMAP_DMA_SYNC_PACKET;
+				dma_params.dst_fi	= dma_data->xfer_size;
+			} else {
+				dma_params.sync_mode	= OMAP_DMA_SYNC_ELEMENT;
+			}
+			dma_params.data_type	= OMAP_DMA_DATA_TYPE_S32;
+		}
 	} else {
 		dma_params.src_amode		= OMAP_DMA_AMODE_CONSTANT;
 		dma_params.dst_amode		= OMAP_DMA_AMODE_POST_INC;
@@ -155,6 +171,10 @@ static int omap_pcm_prepare(struct snd_pcm_substream *substream)
 		dma_params.src_start		= dma_data->port_addr;
 		dma_params.dst_start		= runtime->dma_addr;
 		dma_params.src_port		= OMAP_DMA_PORT_MPUI;
+		if (dma_data->dma_word_size == 32) {
+			printk(KERN_DEBUG "record: Configure for 32 bit word size\n");
+			dma_params.data_type	= OMAP_DMA_DATA_TYPE_S32;
+		}
 	}
 	/*
 	 * Set DMA transfer frame size equal to ALSA period size and frame
@@ -162,12 +182,25 @@ static int omap_pcm_prepare(struct snd_pcm_substream *substream)
 	 * we can transfer the whole ALSA buffer with single DMA transfer but
 	 * still can get an interrupt at each period bounary
 	 */
-	dma_params.elem_count	= snd_pcm_lib_period_bytes(substream) / 2;
+	if (dma_data->dma_word_size == 32)
+		dma_params.elem_count = runtime->period_size;
+	else
+		dma_params.elem_count = snd_pcm_lib_period_bytes(substream) / 2;
 	dma_params.frame_count	= runtime->periods;
 	omap_set_dma_params(prtd->dma_ch, &dma_params);
 
+	/* FIX: raise dma channel priority to reduce pop-noise */
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		omap_dma_set_prio_lch(prtd->dma_ch, 1, 1);
+
 	omap_enable_dma_irq(prtd->dma_ch, OMAP_DMA_FRAME_IRQ);
 
+	if (dma_data->xfer_size) {
+		omap_set_dma_src_burst_mode(prtd->dma_ch,
+					OMAP_DMA_DATA_BURST_16);
+		omap_set_dma_dest_burst_mode(prtd->dma_ch,
+					OMAP_DMA_DATA_BURST_16);
+	}
 	return 0;
 }
 
@@ -175,7 +208,7 @@ static int omap_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct omap_runtime_data *prtd = runtime->private_data;
-	unsigned long flags;
+	unsigned long uninitialized_var(flags);
 	int ret = 0;
 
 	spin_lock_irqsave(&prtd->lock, flags);
@@ -188,10 +221,17 @@ static int omap_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		break;
 
 	case SNDRV_PCM_TRIGGER_STOP:
-	case SNDRV_PCM_TRIGGER_SUSPEND:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
 		prtd->period_index = -1;
 		omap_stop_dma(prtd->dma_ch);
+		omap_disable_lch(prtd->dma_ch);
+		while (omap_get_dma_rd_wr_active_status(prtd->dma_ch))
+			omap_disable_lch(prtd->dma_ch);
+		break;
+
+	case SNDRV_PCM_TRIGGER_SUSPEND:
+		omap_stop_dma(prtd->dma_ch);
+		omap_disable_lch(prtd->dma_ch);
 		break;
 	default:
 		ret = -EINVAL;

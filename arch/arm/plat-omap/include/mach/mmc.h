@@ -14,6 +14,9 @@
 #include <linux/types.h>
 #include <linux/device.h>
 #include <linux/mmc/host.h>
+#ifdef CONFIG_MMC_EMBEDDED_SDIO
+#include <asm/mach/mmc.h>
+#endif
 
 #include <mach/board.h>
 
@@ -37,6 +40,8 @@
 #define OMAP_MMC_MAX_SLOTS	2
 
 struct omap_mmc_platform_data {
+	/* back-link to device */
+	struct device *dev;
 
 	/* number of slots per controller */
 	unsigned nr_slots:2;
@@ -57,7 +62,17 @@ struct omap_mmc_platform_data {
 	int (*suspend)(struct device *dev, int slot);
 	int (*resume)(struct device *dev, int slot);
 
+	/* To get the OFF mode counter */
+	unsigned (*context_loss) (struct device *dev);
+	/* Setup the vdd1 opp */
+	void (*set_vdd1_opp) (struct device *dev, unsigned long);
+	unsigned long max_vdd1_opp;
+	unsigned long min_vdd1_opp;
+
 	u64 dma_mask;
+
+	/* To identify device name */
+	char * name;
 
 	struct omap_mmc_slot_data {
 
@@ -77,7 +92,6 @@ struct omap_mmc_platform_data {
 
 		/* use the internal clock */
 		unsigned internal_clock:1;
-		s16 power_pin;
 
 		int switch_pin;			/* gpio (card detect) */
 		int gpio_wp;			/* gpio (write protect) */
@@ -102,7 +116,10 @@ struct omap_mmc_platform_data {
 		int (* card_detect)(int irq);
 
 		unsigned int ban_openended:1;
-
+#ifdef CONFIG_MMC_EMBEDDED_SDIO
+		struct embedded_sdio_data *embedded_sdio;
+		int (*register_status_notify)(void (*callback)(int card_present, void *dev_id), void *dev_id);
+#endif
 	} slots[OMAP_MMC_MAX_SLOTS];
 };
 

@@ -18,6 +18,7 @@
 
 #include <linux/kernel.h>
 #include <linux/i2c.h>
+#include <linux/string.h>
 
 #include "i2c-core.h"
 
@@ -87,4 +88,21 @@ i2c_register_board_info(int busnum,
 	mutex_unlock(&__i2c_board_lock);
 
 	return status;
+}
+
+void __init
+i2c_remove_board_info(char *type, unsigned short	addr,struct i2c_board_info *info, unsigned *len)
+{
+    int count,j;
+ 
+    for (count=0;count<*len;count++) {
+        if (strcmp(type,info[count].type)==0 && addr == info[count].addr) {
+            // delete the entry by shifting all others up;
+            for (j=count+1;j<*len;j++) {
+                info[j-1]=info[j];
+            }
+            (*len)--;
+            return;
+        }
+    }
 }

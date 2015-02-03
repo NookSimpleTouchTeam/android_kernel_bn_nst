@@ -90,6 +90,8 @@
 /* Dummy defines, these are not available on omap1 */
 #define OMAP_MCBSP_REG_XCCR	0x00
 #define OMAP_MCBSP_REG_RCCR	0x00
+#define OMAP_MCBSP_REG_SYSCON	0x00
+#define OMAP_MCBSP_REG_WAKEUPEN	0x00
 
 #define AUDIO_MCBSP_DATAWRITE	(OMAP1510_MCBSP1_BASE + OMAP_MCBSP_REG_DXR1)
 #define AUDIO_MCBSP_DATAREAD	(OMAP1510_MCBSP1_BASE + OMAP_MCBSP_REG_DRR1)
@@ -134,6 +136,8 @@
 #define OMAP_MCBSP_REG_XCERG	0x74
 #define OMAP_MCBSP_REG_XCERH	0x78
 #define OMAP_MCBSP_REG_SYSCON	0x8C
+#define OMAP_MCBSP_REG_THRSH2	0x90
+#define OMAP_MCBSP_REG_WAKEUPEN	0xA8
 #define OMAP_MCBSP_REG_XCCR	0xAC
 #define OMAP_MCBSP_REG_RCCR	0xB0
 
@@ -249,7 +253,24 @@
 #define RDISABLE		0x0001
 
 /********************** McBSP SYSCONFIG bit definitions ********************/
+#define CLOCKACTIVITY(value)	((value)<<8)
+#define SIDLEMODE(value)	((value)<<3)
+#define ENAWAKEUP		0x0004
 #define SOFTRST			0x0002
+
+/********************** McBSP WAKEUPEN bit definitions *********************/
+#define XEMPTYEOFEN		0x4000
+#define XRDYEN			0x0400
+#define XEOFEN			0x0200
+#define XFSXEN			0x0100
+#define XSYNCERREN		0x0080
+#define RRDYEN			0x0008
+#define REOFEN			0x0004
+#define RFSREN			0x0002
+#define RSYNCERREN		0x0001
+#define WAKEUPEN_ALL		(XEMPTYEOFEN | XRDYEN | XEOFEN | XFSXEN | \
+				 XSYNCERREN | RRDYEN | REOFEN | RFSREN | \
+				 RSYNCERREN)
 
 /* we don't do multichannel for now */
 struct omap_mcbsp_reg_cfg {
@@ -278,6 +299,7 @@ struct omap_mcbsp_reg_cfg {
 	u16 xcerh;
 	u16 xccr;
 	u16 rccr;
+	u16 wken;
 };
 
 typedef enum {
@@ -287,6 +309,20 @@ typedef enum {
 	OMAP_MCBSP4,
 	OMAP_MCBSP5
 } omap_mcbsp_id;
+
+/* McBSP threshold */
+#if defined(CONFIG_ARCH_OMAP34XX)
+static const int omap34xx_mcbsp_thresholds[][2] = {
+	{ 0, 0 },
+	{ 1260, 0},
+	{ 0, 0},
+	{ 0, 0},
+	{ 0, 0},
+};
+#else
+static const int omap34xx_mcbsp_thresholds[][2] = {};
+#endif
+
 
 typedef int __bitwise omap_mcbsp_io_type_t;
 #define OMAP_MCBSP_IRQ_IO ((__force omap_mcbsp_io_type_t) 1)
@@ -389,8 +425,10 @@ void omap_mcbsp_register_board_cfg(struct omap_mcbsp_platform_data *config,
 void omap_mcbsp_config(unsigned int id, const struct omap_mcbsp_reg_cfg * config);
 int omap_mcbsp_request(unsigned int id);
 void omap_mcbsp_free(unsigned int id);
-void omap_mcbsp_start(unsigned int id);
-void omap_mcbsp_stop(unsigned int id);
+void omap_mcbsp_disable_fclk(unsigned int id);
+void omap_mcbsp_enable_fclk(unsigned int id);
+void omap_mcbsp_start(unsigned int id, int tx, int rx);
+void omap_mcbsp_stop(unsigned int id, int tx, int rx);
 void omap_mcbsp_xmit_word(unsigned int id, u32 word);
 u32 omap_mcbsp_recv_word(unsigned int id);
 
@@ -398,7 +436,9 @@ int omap_mcbsp_xmit_buffer(unsigned int id, dma_addr_t buffer, unsigned int leng
 int omap_mcbsp_recv_buffer(unsigned int id, dma_addr_t buffer, unsigned int length);
 int omap_mcbsp_spi_master_xmit_word_poll(unsigned int id, u32 word);
 int omap_mcbsp_spi_master_recv_word_poll(unsigned int id, u32 * word);
+void omap_mcbsp_set_tx_threshold(unsigned int id, u16 threshold);
 
+unsigned int omap_mcbsp_pending_status(unsigned int id);
 
 /* SPI specific API */
 void omap_mcbsp_set_spi_mode(unsigned int id, const struct omap_mcbsp_spi_cfg * spi_cfg);

@@ -100,6 +100,18 @@ config SND_SOC_TLV320AIC3X
 	tristate
 	depends on I2C
 
+config SND_SOC_TLV320AIC3254
+	tristate "Texas Instruments TLVAIC3254 codec support"
+	depends on I2C
+
+config SND_SOC_TLV320AIC3111
+	tristate "Texas Instruments TLVAIC3111 codec support"
+	depends on I2C
+
+config SND_SOC_DAC3100
+	tristate "Texas Instruments DAC3100 codecs support"
+	depends on I2C
+
 config SND_SOC_TWL4030
 	tristate
 	depends on TWL4030_CORE

@@ -18,7 +18,11 @@ struct omap_nand_platform_data {
 	int			nr_parts;
 	int			(*nand_setup)(void __iomem *);
 	int			(*dev_ready)(struct omap_nand_platform_data *);
+	int			(*unlock)(struct mtd_info *, loff_t, size_t);
+	void			(*board_unlock)(struct mtd_info *,
+					struct device *);
 	int			dma_channel;
 	void __iomem		*gpmc_cs_baseaddr;
 	void __iomem		*gpmc_baseaddr;
+	int			ecc_opt; /* 0x0 - sw ecc, 0x1 - hw ecc */
 };

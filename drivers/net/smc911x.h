@@ -689,6 +689,7 @@ smc_pxa_dma_outsl(struct smc911x_local *lp, u_long physaddr,
 #define CHIP_9215	0x115A
 #define CHIP_9217	0x117A
 #define CHIP_9218	0x118A
+#define CHIP_9221	0x9221
 
 struct chip_id {
 	u16 id;
@@ -704,6 +705,7 @@ static const struct chip_id chip_ids[] =  {
 	{ CHIP_9215, "LAN9215" },
 	{ CHIP_9217, "LAN9217" },
 	{ CHIP_9218, "LAN9218" },
+	{ CHIP_9221, "LAN9221" },
 	{ 0, NULL },
 };
 
@@ -738,7 +740,7 @@ static const struct chip_id chip_ids[] =  {
 #define SMC_SET_FIFO_INT(lp, x)		SMC_outl( x, lp, FIFO_INT )
 #define SMC_SET_FIFO_TDA(lp, x)					\
 	do {							\
-		unsigned long __flags;				\
+		unsigned long uninitialized_var(__flags);	\
 		int __mask;					\
 		local_irq_save(__flags);			\
 		__mask = SMC_GET_FIFO_INT((lp)) & ~(0xFF<<24);	\

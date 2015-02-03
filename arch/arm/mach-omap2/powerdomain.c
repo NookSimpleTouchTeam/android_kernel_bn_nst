@@ -35,6 +35,13 @@
 #include <mach/powerdomain.h>
 #include <mach/clockdomain.h>
 
+#include "pm.h"
+
+enum {
+	PWRDM_STATE_NOW = 0,
+	PWRDM_STATE_PREV,
+};
+
 /* pwrdm_list contains all registered struct powerdomains */
 static LIST_HEAD(pwrdm_list);
 
@@ -83,7 +90,7 @@ static struct powerdomain *_pwrdm_deps_lookup(struct powerdomain *pwrdm,
 	if (!pwrdm || !deps || !omap_chip_is(pwrdm->omap_chip))
 		return ERR_PTR(-EINVAL);
 
-	for (pd = deps; pd; pd++) {
+	for (pd = deps; pd->pwrdm_name; pd++) {
 
 		if (!omap_chip_is(pd->omap_chip))
 			continue;
@@ -96,12 +103,89 @@ static struct powerdomain *_pwrdm_deps_lookup(struct powerdomain *pwrdm,
 
 	}
 
-	if (!pd)
+	if (!pd->pwrdm_name)
 		return ERR_PTR(-ENOENT);
 
 	return pd->pwrdm;
 }
 
+static int _pwrdm_state_switch(struct powerdomain *pwrdm, int flag)
+{
+
+	u8  prev;
+	u8  state;
+
+	if (pwrdm == NULL)
+		return -EINVAL;
+
+	state = pwrdm_read_pwrst(pwrdm);
+
+	switch (flag) {
+	case PWRDM_STATE_NOW:
+		prev = pwrdm->state;
+		break;
+	case PWRDM_STATE_PREV:
+		prev = pwrdm_read_prev_pwrst(pwrdm);
+		if (pwrdm->state != prev)
+			pwrdm->state_counter[prev]++;
+		if (prev == PWRDM_POWER_RET) {
+			if ((pwrdm->pwrsts_logic_ret == PWRSTS_OFF_RET) &&
+					(pwrdm_read_prev_logic_pwrst(pwrdm) ==
+					PWRDM_POWER_OFF))
+				pwrdm->ret_logic_off_counter++;
+			if ((pwrdm->pwrsts_mem_ret[0] == PWRSTS_OFF_RET) &&
+					(pwrdm_read_prev_mem_pwrst(pwrdm, 0) ==
+					PWRDM_POWER_OFF))
+				pwrdm->ret_mem_off_counter++;
+		}
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	if (state != prev)
+		pwrdm->state_counter[state]++;
+
+	pm_dbg_update_time(pwrdm, prev);
+
+	pwrdm->state = state;
+
+	return 0;
+}
+
+static int _pwrdm_pre_transition_cb(struct powerdomain *pwrdm, void *unused)
+{
+	pwrdm_clear_all_prev_pwrst(pwrdm);
+	_pwrdm_state_switch(pwrdm, PWRDM_STATE_NOW);
+	return 0;
+}
+
+static int _pwrdm_post_transition_cb(struct powerdomain *pwrdm, void *unused)
+{
+	_pwrdm_state_switch(pwrdm, PWRDM_STATE_PREV);
+	return 0;
+}
+
+static __init void _pwrdm_setup(struct powerdomain *pwrdm)
+{
+	int i;
+	int state;
+
+	for (i = 0; i < 4; i++)
+		pwrdm->state_counter[i] = 0;
+	pwrdm->ret_logic_off_counter = 0;
+	pwrdm->ret_mem_off_counter = 0;
+
+	pwrdm_wait_transition(pwrdm);
+	state = pwrdm_read_pwrst(pwrdm);
+	if (state < 0) {
+		pr_err("powerdomain: invalid state for %s\n", pwrdm->name);
+		return;
+	}
+	pwrdm->state = state;
+	pwrdm->state_counter[pwrdm->state] = 1;
+
+}
 
 /* Public functions */
 
@@ -117,9 +201,12 @@ void pwrdm_init(struct powerdomain **pwrdm_list)
 {
 	struct powerdomain **p = NULL;
 
-	if (pwrdm_list)
-		for (p = pwrdm_list; *p; p++)
+	if (pwrdm_list) {
+		for (p = pwrdm_list; *p; p++) {
 			pwrdm_register(*p);
+			_pwrdm_setup(*p);
+		}
+	}
 }
 
 /**
@@ -152,6 +239,7 @@ int pwrdm_register(struct powerdomain *pwrdm)
 	pr_debug("powerdomain: registered %s\n", pwrdm->name);
 	ret = 0;
 
+	pwrdm->next_state = -1;
 pr_unlock:
 	write_unlock_irqrestore(&pwrdm_rwlock, flags);
 
@@ -204,34 +292,49 @@ struct powerdomain *pwrdm_lookup(const char *name)
 }
 
 /**
- * pwrdm_for_each - call function on each registered clockdomain
+ * pwrdm_for_each_nolock - call function on each registered clockdomain
  * @fn: callback function *
  *
  * Call the supplied function for each registered powerdomain.  The
  * callback function can return anything but 0 to bail out early from
- * the iterator.  The callback function is called with the pwrdm_rwlock
- * held for reading, so no powerdomain structure manipulation
- * functions should be called from the callback, although hardware
- * powerdomain control functions are fine.  Returns the last return
- * value of the callback function, which should be 0 for success or
- * anything else to indicate failure; or -EINVAL if the function
- * pointer is null.
+ * the iterator.Returns the last return value of the callback function, which
+ * should be 0 for success or anything else to indicate failure; or -EINVAL
+ * if the function pointer is null.
  */
-int pwrdm_for_each(int (*fn)(struct powerdomain *pwrdm))
+int pwrdm_for_each_nolock(int (*fn)(struct powerdomain *pwrdm, void *user),
+			void *user)
 {
 	struct powerdomain *temp_pwrdm;
-	unsigned long flags;
 	int ret = 0;
 
 	if (!fn)
 		return -EINVAL;
 
-	read_lock_irqsave(&pwrdm_rwlock, flags);
 	list_for_each_entry(temp_pwrdm, &pwrdm_list, node) {
-		ret = (*fn)(temp_pwrdm);
+		ret = (*fn)(temp_pwrdm, user);
 		if (ret)
 			break;
 	}
+
+	return ret;
+}
+/**
+ * pwrdm_for_each - call function on each registered clockdomain
+ * @fn: callback function
+ *
+ * This function is the same as 'pwrdm_for_each_nolock()', but keeps the
+ * &pwrdm_rwlock locked for reading, so no powerdomain structure manipulation
+ * functions should be called from the callback, although hardware powerdomain
+ * control functions are fine.
+ */
+int pwrdm_for_each(int (*fn)(struct powerdomain *pwrdm, void *user),
+			void *user)
+{
+	unsigned long flags;
+	int ret;
+
+	read_lock_irqsave(&pwrdm_rwlock, flags);
+	ret = pwrdm_for_each_nolock(fn, user);
 	read_unlock_irqrestore(&pwrdm_rwlock, flags);
 
 	return ret;
@@ -616,8 +719,13 @@ int pwrdm_get_mem_bank_count(struct powerdomain *pwrdm)
  */
 int pwrdm_set_next_pwrst(struct powerdomain *pwrdm, u8 pwrst)
 {
+	u8 prg_pwrst;
+
 	if (!pwrdm)
 		return -EINVAL;
+
+	if (pwrdm->next_state == pwrst)
+		return 0;
 
 	if (!(pwrdm->pwrsts & (1 << pwrst)))
 		return -EINVAL;
@@ -625,9 +733,22 @@ int pwrdm_set_next_pwrst(struct powerdomain *pwrdm, u8 pwrst)
 	pr_debug("powerdomain: setting next powerstate for %s to %0x\n",
 		 pwrdm->name, pwrst);
 
+	/* INACTIVE is reserved, so we program pwrdm as ON */
+	if (pwrst == PWRDM_POWER_INACTIVE)
+		prg_pwrst = PWRDM_POWER_ON;
+	else
+		prg_pwrst = pwrst;
+
 	prm_rmw_mod_reg_bits(OMAP_POWERSTATE_MASK,
-			     (pwrst << OMAP_POWERSTATE_SHIFT),
+			     (prg_pwrst << OMAP_POWERSTATE_SHIFT),
 			     pwrdm->prcm_offs, PM_PWSTCTRL);
+
+	/* If next state is ON, prevent idle */
+	if (pwrst == PWRDM_POWER_ON)
+		omap2_clkdm_deny_idle(pwrdm->pwrdm_clkdms[0]);
+	else
+		omap2_clkdm_allow_idle(pwrdm->pwrdm_clkdms[0]);
+	pwrdm->next_state = pwrst;
 
 	return 0;
 }
@@ -644,6 +765,9 @@ int pwrdm_read_next_pwrst(struct powerdomain *pwrdm)
 {
 	if (!pwrdm)
 		return -EINVAL;
+
+	if (pwrdm->next_state > -1)
+		return pwrdm->next_state;
 
 	return prm_read_mod_bits_shift(pwrdm->prcm_offs, PM_PWSTCTRL,
 					OMAP_POWERSTATE_MASK);
@@ -881,6 +1005,29 @@ int pwrdm_read_prev_logic_pwrst(struct powerdomain *pwrdm)
 }
 
 /**
+ * pwrdm_read_next_logic_pwrst - get next powerdomain logic power state
+ * @pwrdm: struct powerdomain * to get next logic power state
+ *
+ * Return the powerdomain pwrdm's logic power state.  Returns -EINVAL
+ * if the powerdomain pointer is null or returns the next logic
+ * power state upon success.
+ */
+int pwrdm_read_next_logic_pwrst(struct powerdomain *pwrdm)
+{
+	if (!pwrdm)
+		return -EINVAL;
+
+	/*
+	 * The register bit names below may not correspond to the
+	 * actual names of the bits in each powerdomain's register,
+	 * but the type of value returned is the same for each
+	 * powerdomain.
+	 */
+	return prm_read_mod_bits_shift(pwrdm->prcm_offs, PM_PWSTCTRL,
+					OMAP3430_LOGICSTATEST);
+}
+
+/**
  * pwrdm_read_mem_pwrst - get current memory bank power state
  * @pwrdm: struct powerdomain * to get current memory bank power state
  * @bank: memory bank number (0-3)
@@ -947,6 +1094,16 @@ int pwrdm_read_prev_mem_pwrst(struct powerdomain *pwrdm, u8 bank)
 	if (pwrdm->banks < (bank + 1))
 		return -EEXIST;
 
+#ifdef CONFIG_ARCH_OMAP3430
+	/*
+	 * In 3430, for MPU domain bank 0 status bits
+	 * are displayed in the position of bank1 status bits
+	 * in PREPWST  . So the hack. Think of a cleaner
+	 * way of doing this
+	 */
+	if (!strcmp("mpu_pwrdm", pwrdm->name))
+		bank = 1;
+#endif
 	/*
 	 * The register bit names below may not correspond to the
 	 * actual names of the bits in each powerdomain's register,
@@ -973,6 +1130,54 @@ int pwrdm_read_prev_mem_pwrst(struct powerdomain *pwrdm, u8 bank)
 
 	return prm_read_mod_bits_shift(pwrdm->prcm_offs,
 					OMAP3430_PM_PREPWSTST, m);
+}
+
+/**
+ * pwrdm_read_next_mem_pwrst - get next memory bank power state
+ * @pwrdm: struct powerdomain * to get mext memory bank power state
+ * @bank: memory bank number (0-3)
+ *
+ * Return the powerdomain pwrdm's next memory power state for bank
+ * x.  Returns -EINVAL if the powerdomain pointer is null, -EEXIST if
+ * the target memory bank does not exist or is not controllable, or
+ * returns the next memory power state upon success.
+ */
+int pwrdm_read_next_mem_pwrst(struct powerdomain *pwrdm, u8 bank)
+{
+	u32 m;
+
+	if (!pwrdm)
+		return -EINVAL;
+
+	if (pwrdm->banks < (bank + 1))
+		return -EEXIST;
+
+	/*
+	 * The register bit names below may not correspond to the
+	 * actual names of the bits in each powerdomain's register,
+	 * but the type of value returned is the same for each
+	 * powerdomain.
+	 */
+	switch (bank) {
+	case 0:
+		m = OMAP3430_SHAREDL1CACHEFLATRETSTATE;
+		break;
+	case 1:
+		m = OMAP3430_L1FLATMEMRETSTATE;
+		break;
+	case 2:
+		m = OMAP3430_SHAREDL2CACHEFLATRETSTATE;
+		break;
+	case 3:
+		m = OMAP3430_SHAREDL2CACHEFLATRETSTATE;
+		break;
+	default:
+		WARN_ON(1); /* should never happen */
+		return -EEXIST;
+	}
+
+	return prm_read_mod_bits_shift(pwrdm->prcm_offs,
+					PM_PWSTCTRL, m);
 }
 
 /**
@@ -1110,4 +1315,59 @@ int pwrdm_wait_transition(struct powerdomain *pwrdm)
 	return 0;
 }
 
+/**
+ * pwrdm_can_idle - check if the powerdomain can enter idle
+ * @pwrdm: struct powerdomain * the powerdomain to check status of
+ *
+ * Does a functional clock check for the powerdomain and returns 1 if the
+ * powerdomain can enter idle, 0 if not.
+ */
+int pwrdm_can_idle(struct powerdomain *pwrdm)
+{
+	int i;
+	const int fclk_regs[] = { CM_FCLKEN, OMAP3430ES2_CM_FCLKEN3 };
+
+	if (!pwrdm)
+		return -EINVAL;
+
+	for (i = 0; i < pwrdm->fclk_reg_amt; i++)
+		if (cm_read_mod_reg(pwrdm->prcm_offs, fclk_regs[i]) &
+				(0xffffffff ^ pwrdm->fclk_masks[i]))
+			return 0;
+	return 1;
+}
+
+
+int pwrdm_state_switch(struct powerdomain *pwrdm)
+{
+	return _pwrdm_state_switch(pwrdm, PWRDM_STATE_NOW);
+}
+
+int pwrdm_clkdm_state_switch(struct clockdomain *clkdm)
+{
+	if (clkdm != NULL && clkdm->pwrdm.ptr != NULL) {
+		pwrdm_wait_transition(clkdm->pwrdm.ptr);
+		return pwrdm_state_switch(clkdm->pwrdm.ptr);
+	}
+
+	return -EINVAL;
+}
+int pwrdm_clk_state_switch(struct clk *clk)
+{
+	if (clk != NULL && clk->clkdm.ptr != NULL)
+		return pwrdm_clkdm_state_switch(clk->clkdm.ptr);
+	return -EINVAL;
+}
+
+int pwrdm_pre_transition(void)
+{
+	pwrdm_for_each(_pwrdm_pre_transition_cb, NULL);
+	return 0;
+}
+
+int pwrdm_post_transition(void)
+{
+	pwrdm_for_each(_pwrdm_post_transition_cb, NULL);
+	return 0;
+}
 

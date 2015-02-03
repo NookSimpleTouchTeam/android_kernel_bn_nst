@@ -91,6 +91,18 @@ config TOUCHSCREEN_GUNZE
 	  To compile this driver as a module, choose M here: the
 	  module will be called gunze.
 
+config TOUCHSCREEN_SO
+	tristate "Senstive Object touchscreen"
+	select SERIO
+	help
+	  Say Y here if you have Senstive Object touchscreen (used in
+	  OMAP EDP1 e-book reader.
+
+	  If unsure, say N
+
+	  To compile this driver as a modules, choose M here: the
+	  module will be called sotouch.
+
 config TOUCHSCREEN_ELO
 	tristate "Elo serial touchscreens"
 	select SERIO
@@ -206,6 +218,25 @@ config TOUCHSCREEN_MIGOR
 	  To compile this driver as a module, choose M here: the
 	  module will be called migor_ts.
 
+config TOUCHSCREEN_SYNAPTICS_I2C_RMI
+	tristate "Synaptics i2c touchscreen"
+	depends on I2C
+	help
+	  This enables support for Synaptics RMI over I2C based touchscreens.
+
+config TOUCHSCREEN_CY8CTMG120_I2C
+	tristate "Cypress CY8CTMG120 i2c touchscreen"
+	depends on I2C
+        default y
+	help
+	  This enables support for Cypress CY8CTMG120 over I2C based touchscreens.
+
+config TOUCHSCREEN_PIXCIR_I2C
+	tristate "Wintek 9inch i2c touchscreen"
+	depends on I2C
+	help
+	  This enables support for Wintek 9inch over I2C based touchscreens.
+
 config TOUCHSCREEN_TOUCHRIGHT
 	tristate "Touchright serial touchscreen"
 	select SERIO
@@ -241,6 +272,32 @@ config TOUCHSCREEN_ATMEL_TSADCC
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called atmel_tsadcc.
+
+config TOUCHSCREEN_TSC2005
+	tristate "TSC2005 touchscreen support"
+	depends on SPI_MASTER
+	help
+	  Say Y here for if you are using the touchscreen features of TSC2005.
+
+config TOUCHSCREEN_TSC210X
+	tristate "TI TSC210x based touchscreens"
+	depends on SPI_MASTER
+	select SPI_TSC210X
+	help
+	  Say Y here if you have a touchscreen interface using a
+	  TI TSC210x controller, and your board-specific initialisation
+	  code includes that in its table of SPI devices.
+
+	  If unsure, say N (but it's safe to say "Y").
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called tsc210x_ts.
+
+config TOUCHSCREEN_TSC2301
+	tristate "TSC2301 touchscreen support"
+	depends on SPI_TSC2301
+	help
+	  Say Y here for if you are using the touchscreen features of TSC2301.
 
 config TOUCHSCREEN_UCB1400
 	tristate "Philips UCB1400 touchscreen"
@@ -407,5 +464,25 @@ config TOUCHSCREEN_TSC2007
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called tsc2007.
+
+config TOUCHSCREEN_CYTTSP_I2C
+    tristate "Cypress TTSP based touchscreens"
+    depends on I2C
+    help
+      Say Y here if you a Cypress TTSP based touchscreen.
+
+      If unsure, say N.
+
+config TOUCHSCREEN_ZFORCE
+	tristate "zForce based touchscreens"
+	depends on I2C
+	default y
+	help
+	  Say Y here if you have a zForce based touchscreen.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called zForce.
 
 endif

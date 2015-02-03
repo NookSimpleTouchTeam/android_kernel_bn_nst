@@ -63,17 +63,42 @@ config BATTERY_TOSA
 	  Say Y to enable support for the battery on the Sharp Zaurus
 	  SL-6000 (tosa) models.
 
+config TWL4030_BCI_BATTERY
+	tristate "OMAP TWL4030 BCI Battery driver"
+	depends on TWL4030_CORE && TWL4030_MADC
+	help
+	  Support for OMAP TWL4030 BCI Battery driver.
+	  This driver can give support for TWL4030 Battery Charge Interface.
+
 config BATTERY_WM97XX
 	bool "WM97xx generic battery driver"
 	depends on TOUCHSCREEN_WM97XX=y
 	help
 	  Say Y to enable support for battery measured by WM97xx aux port.
 
+config BATTERY_MAX17042
+	tristate "MAX17042 gas gauge driver"
+	depends on I2C
+	help
+	  Say Y here to enable support for chip MAX17042 gas gauge.
+
 config BATTERY_BQ27x00
 	tristate "BQ27200 battery driver"
 	depends on I2C
 	help
 	  Say Y here to enable support for batteries with BQ27200(I2C) chip.
+
+config BATTERY_BQ27510
+	tristate "BQ27510 battery driver"
+	depends on I2C
+	help
+	  Say Y here to enable support for batteries with BQ27510(I2C) chip.
+
+config BATTERY_BQ27520
+	bool "BQ27520 battery driver"
+	depends on I2C && BATTERY_BQ27510
+	help
+	  Say Y here to enable support for batteries with BQ27520(I2C) chip.
 
 config BATTERY_DA9030
 	tristate "DA9030 battery driver"
@@ -87,5 +112,11 @@ config CHARGER_PCF50633
 	depends on MFD_PCF50633
 	help
 	 Say Y to include support for NXP PCF50633 Main Battery Charger.
+	 
+config CHARGER_MAX8903
+	tristate "MAX8903 charger driver"
+	depends on BATTERY_MAX17042 && GENERIC_GPIO
+	help
+	Say Y here to enable support for MAXIM8903 charger 
 
 endif # POWER_SUPPLY

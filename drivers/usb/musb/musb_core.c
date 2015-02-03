@@ -862,7 +862,7 @@ static irqreturn_t musb_stage2_irq(struct musb *musb, u8 int_usb,
 void musb_start(struct musb *musb)
 {
 	void __iomem	*regs = musb->mregs;
-	u8		devctl = musb_readb(regs, MUSB_DEVCTL);
+	u8 		devctl = musb_readb(regs, MUSB_DEVCTL);
 
 	DBG(2, "<== devctl %02x\n", devctl);
 
@@ -921,6 +921,10 @@ static void musb_generic_disable(struct musb *musb)
 
 	/* off */
 	musb_writeb(mbase, MUSB_DEVCTL, 0);
+#if defined(CONFIG_MACH_OMAP3621_EVT1A) || defined(CONFIG_MACH_OMAP3621_GOSSAMER)
+	// For Encore disable and enable HS
+	musb_writeb(mbase, MUSB_POWER, MUSB_POWER_HSENAB);
+#endif
 
 	/*  flush pending interrupts */
 	temp = musb_readb(mbase, MUSB_INTRUSB);
@@ -1304,8 +1308,7 @@ static int __init musb_core_init(u16 musb_type, struct musb *musb)
 #endif
 	u8 reg;
 	char *type;
-	u16 hwvers, rev_major, rev_minor;
-	char aInfo[78], aRevision[32], aDate[12];
+	char aInfo[100], aRevision[32], aDate[12];
 	void __iomem	*mbase = musb->mregs;
 	int		status = 0;
 	int		i;
@@ -1377,11 +1380,10 @@ static int __init musb_core_init(u16 musb_type, struct musb *musb)
 	}
 
 	/* log release info */
-	hwvers = musb_read_hwvers(mbase);
-	rev_major = (hwvers >> 10) & 0x1f;
-	rev_minor = hwvers & 0x3ff;
-	snprintf(aRevision, 32, "%d.%d%s", rev_major,
-		rev_minor, (hwvers & 0x8000) ? "RC" : "");
+	musb->hwvers = musb_read_hwvers(mbase);
+	snprintf(aRevision, 32, "%d.%d%s", MUSB_HWVERS_MAJOR(musb->hwvers),
+		MUSB_HWVERS_MINOR(musb->hwvers),
+		(musb->hwvers & MUSB_HWVERS_RC) ? "RC" : "");
 	printk(KERN_DEBUG "%s: %sHDRC RTL version %s %s\n",
 			musb_driver_name, type, aRevision, aDate);
 
@@ -2142,15 +2144,14 @@ static int __devexit musb_remove(struct platform_device *pdev)
 
 #ifdef	CONFIG_PM
 
-static int musb_suspend(struct platform_device *pdev, pm_message_t message)
+static int musb_suspend_late(struct platform_device *pdev, pm_message_t message)
 {
-	unsigned long	flags;
 	struct musb	*musb = dev_to_musb(&pdev->dev);
 
 	if (!musb->clock)
 		return 0;
 
-	spin_lock_irqsave(&musb->lock, flags);
+	musb_platform_save_context(musb);
 
 	if (is_peripheral_active(musb)) {
 		/* FIXME force disconnect unless we know USB will wake
@@ -2166,30 +2167,28 @@ static int musb_suspend(struct platform_device *pdev, pm_message_t message)
 		musb->set_clock(musb->clock, 0);
 	else
 		clk_disable(musb->clock);
-	spin_unlock_irqrestore(&musb->lock, flags);
+
 	return 0;
 }
 
-static int musb_resume(struct platform_device *pdev)
+static int musb_resume_early(struct platform_device *pdev)
 {
-	unsigned long	flags;
 	struct musb	*musb = dev_to_musb(&pdev->dev);
 
 	if (!musb->clock)
 		return 0;
-
-	spin_lock_irqsave(&musb->lock, flags);
 
 	if (musb->set_clock)
 		musb->set_clock(musb->clock, 1);
 	else
 		clk_enable(musb->clock);
 
+	musb_platform_restore_context(musb);
+
 	/* for static cmos like DaVinci, register values were preserved
 	 * unless for some reason the whole soc powered down and we're
 	 * not treating that as a whole-system restart (e.g. swsusp)
 	 */
-	spin_unlock_irqrestore(&musb->lock, flags);
 	return 0;
 }
 
@@ -2206,8 +2205,10 @@ static struct platform_driver musb_driver = {
 	},
 	.remove		= __devexit_p(musb_remove),
 	.shutdown	= musb_shutdown,
-	.suspend	= musb_suspend,
-	.resume		= musb_resume,
+#ifdef CONFIG_PM
+	.suspend_late	= musb_suspend_late,
+	.resume_early	= musb_resume_early,
+#endif
 };
 
 /*-------------------------------------------------------------------------*/

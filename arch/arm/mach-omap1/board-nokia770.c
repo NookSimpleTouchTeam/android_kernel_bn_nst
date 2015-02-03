@@ -18,6 +18,7 @@
 #include <linux/spi/spi.h>
 #include <linux/spi/ads7846.h>
 #include <linux/workqueue.h>
+#include <linux/omapfb.h>
 #include <linux/delay.h>
 
 #include <mach/hardware.h>
@@ -32,9 +33,9 @@
 #include <mach/keypad.h>
 #include <mach/common.h>
 #include <mach/dsp_common.h>
-#include <mach/omapfb.h>
 #include <mach/lcd_mipid.h>
 #include <mach/mmc.h>
+#include <mach/usb.h>
 
 #define ADS7846_PENDOWN_GPIO	15
 
@@ -181,11 +182,7 @@ static struct omap_usb_config nokia770_usb_config __initdata = {
 static int nokia770_mmc_set_power(struct device *dev, int slot, int power_on,
 				int vdd)
 {
-	if (power_on)
-		gpio_set_value(NOKIA770_GPIO_MMC_POWER, 1);
-	else
-		gpio_set_value(NOKIA770_GPIO_MMC_POWER, 0);
-
+	gpio_set_value(NOKIA770_GPIO_MMC_POWER, power_on);
 	return 0;
 }
 
@@ -232,10 +229,6 @@ static inline void nokia770_mmc_init(void)
 {
 }
 #endif
-
-static struct omap_board_config_kernel nokia770_config[] __initdata = {
-	{ OMAP_TAG_USB,		NULL },
-};
 
 #if	defined(CONFIG_OMAP_DSP)
 /*
@@ -371,19 +364,16 @@ static __init int omap_dsp_init(void)
 
 static void __init omap_nokia770_init(void)
 {
-	nokia770_config[0].data = &nokia770_usb_config;
-
 	platform_add_devices(nokia770_devices, ARRAY_SIZE(nokia770_devices));
 	spi_register_board_info(nokia770_spi_board_info,
 				ARRAY_SIZE(nokia770_spi_board_info));
-	omap_board_config = nokia770_config;
-	omap_board_config_size = ARRAY_SIZE(nokia770_config);
 	omap_gpio_init();
 	omap_serial_init();
 	omap_register_i2c_bus(1, 100, NULL, 0);
 	omap_dsp_init();
 	ads7846_dev_init();
 	mipid_dev_init();
+	omap_usb_init(&nokia770_usb_config);
 	nokia770_mmc_init();
 }
 

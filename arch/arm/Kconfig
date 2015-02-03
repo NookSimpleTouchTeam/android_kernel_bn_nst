@@ -160,6 +160,12 @@ config GENERIC_HARDIRQS_NO__DO_IRQ
 
 if OPROFILE
 
+config OPROFILE_OMAP_GPTIMER
+	def_bool y
+	depends on ARCH_OMAP
+	select CONFIG_OMAP_32K_TIMER
+	select CONFIG_OMAP_DM_TIMER
+
 config OPROFILE_ARMV6
 	def_bool y
 	depends on CPU_V6 && !SMP
@@ -174,7 +180,7 @@ config OPROFILE_ARM11_CORE
 	bool
 
 config OPROFILE_ARMV7
-	def_bool y
+	def_bool n
 	depends on CPU_V7 && !SMP
 	bool
 
@@ -705,6 +711,53 @@ config XSCALE_PMU
 if !MMU
 source "arch/arm/Kconfig-nommu"
 endif
+
+comment "errata"
+
+config ARM_ERRATA_430973
+
+        bool "ARM errata: Stale prediction on replaced interworking branch"
+        depends on CPU_V7
+        help
+          This option enables the workaround for the 430973 Cortex-A8
+          (r1p0..r1p2) erratum. If a code sequence containing an ARM/Thumb
+          interworking branch is replaced with another code sequence at the
+          same virtual address, whether due to self-modifying code or virtual
+          to physical address re-mapping, Cortex-A8 does not recover from the
+          stale interworking branch prediction. This results in Cortex-A8
+          executing the new code sequence in the incorrect ARM or Thumb state.
+          The workaround enables the BTB/BTAC operations by setting ACTLR.IBE
+          and also flushes the branch target cache at every context switch.
+          Note that setting specific bits in the ACTLR register may not be
+          available in non-secure mode.
+
+config ARM_ERRATA_451027
+        bool "Neon loads/stores may incorrectly report data abort on Cortex-A8"
+        depends on CPU_V7 && NEON
+        default n
+        help
+          This option enables the workaround for the erratum 451027
+	  Cortex-A8(r1p0,r1p1,r1p2,r1p3).
+	  For a specific sequence of load and store operations, it is possible
+	  for an erroneous abort response to be reported on a Neon load or
+	  store instruction.
+	  This workaround fixes the AXI errors generated on cache lines issue.
+
+config ARM_ERRATUM_451034
+        bool "Enable workaround for ARM erratum 451034"
+        depends on VFPv3 && NEON
+        help
+          On Cortex-A8 r1p0 and r1p1, executing a NEON store with an integer
+          store in the store buffer, can cause a processor deadlock under
+          certain conditions.
+
+          See ARM Cortex-A8 Errata Notice (PR120-PRDC-008070) for full details.
+
+          Say Y to include a partial workaround.
+
+          WARNING: Even with this option enabled, userspace code can trigger
+          the deadlock.  To safely run untrusted code, a different fix is
+          required.
 
 endmenu
 
@@ -1313,6 +1366,8 @@ source "drivers/accessibility/Kconfig"
 
 source "drivers/leds/Kconfig"
 
+source "drivers/switch/Kconfig"
+
 source "drivers/rtc/Kconfig"
 
 source "drivers/dma/Kconfig"
@@ -1326,6 +1381,12 @@ source "drivers/regulator/Kconfig"
 source "drivers/uio/Kconfig"
 
 source "drivers/staging/Kconfig"
+
+if ARCH_OMAP
+source "drivers/cbus/Kconfig"
+endif
+
+source "drivers/dsp/bridge/Kconfig"
 
 endmenu
 

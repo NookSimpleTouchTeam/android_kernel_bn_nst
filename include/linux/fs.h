@@ -1892,6 +1892,13 @@ extern struct file *do_filp_open(int dfd, const char *pathname,
 extern int may_open(struct path *, int, int);
 
 extern int kernel_read(struct file *, unsigned long, char *, unsigned long);
+#ifdef CONFIG_BATTERY_MAX17042
+#if 1
+extern ssize_t kernel_write(struct file *, const char *, size_t, loff_t);
+#else
+extern int kernel_write(struct file *, unsigned long, const char *, unsigned long);
+#endif
+#endif
 extern struct file * open_exec(const char *);
  
 /* fs/dcache.c -- generic fs support functions */

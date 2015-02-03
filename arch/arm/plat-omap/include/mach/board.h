@@ -17,16 +17,18 @@
 /* Different peripheral ids */
 #define OMAP_TAG_CLOCK		0x4f01
 #define OMAP_TAG_SERIAL_CONSOLE 0x4f03
-#define OMAP_TAG_USB		0x4f04
 #define OMAP_TAG_LCD		0x4f05
 #define OMAP_TAG_GPIO_SWITCH	0x4f06
 #define OMAP_TAG_UART		0x4f07
 #define OMAP_TAG_FBMEM		0x4f08
 #define OMAP_TAG_STI_CONSOLE	0x4f09
 #define OMAP_TAG_CAMERA_SENSOR	0x4f0a
+#define OMAP_TAG_PARTITION      0x4f0b
+#define OMAP_TAG_TEA5761	0x4f10
+#define OMAP_TAG_TMP105		0x4f11
 
 #define OMAP_TAG_BOOT_REASON    0x4f80
-#define OMAP_TAG_FLASH_PART	0x4f81
+#define OMAP_TAG_FLASH_PART_STR	0x4f81
 #define OMAP_TAG_VERSION_STR	0x4f82
 
 struct omap_clock_config {
@@ -42,12 +44,6 @@ struct omap_serial_console_config {
 struct omap_sti_console_config {
 	unsigned enable:1;
 	u8 channel;
-};
-
-struct omap_camera_sensor_config {
-	u16 reset_gpio;
-	int (*power_on)(void * data);
-	int (*power_off)(void * data);
 };
 
 struct omap_usb_config {
@@ -102,16 +98,18 @@ struct omap_pwm_led_platform_data {
 	const char *name;
 	int intensity_timer;
 	int blink_timer;
+	int def_on;
 	void (*set_power)(struct omap_pwm_led_platform_data *self, int on_off);
+	int def_brightness;
 };
 
 /* See arch/arm/plat-omap/include/mach/gpio-switch.h for definitions */
 struct omap_gpio_switch_config {
 	char name[12];
 	u16 gpio;
-	int flags:4;
-	int type:4;
-	int key_code:24; /* Linux key code */
+	u8 flags:4;
+	u8 type:4;
+	unsigned int key_code:24; /* Linux key code */
 };
 
 struct omap_uart_config {
@@ -119,8 +117,25 @@ struct omap_uart_config {
 	unsigned int enabled_uarts;
 };
 
+struct omap_tea5761_config {
+	u16 enable_gpio;
+};
 
-struct omap_flash_part_config {
+/* This cannot be passed from the bootloader */
+struct omap_tmp105_config {
+	u16 tmp105_irq_pin;
+	int (*set_power)(int enable);
+};
+
+struct omap_partition_config {
+	char name[16];
+	unsigned int size;
+	unsigned int offset;
+	/* same as in include/linux/mtd/partitions.h */
+	unsigned int mask_flags;
+};
+
+struct omap_flash_part_str_config {
 	char part_table[0];
 };
 
@@ -133,9 +148,6 @@ struct omap_version_config {
 	char version[12];
 };
 
-
-#include <mach/board-nokia.h>
-
 struct omap_board_config_entry {
 	u16 tag;
 	u16 len;
@@ -147,12 +159,21 @@ struct omap_board_config_kernel {
 	const void *data;
 };
 
+struct omap_vout_config {
+	u16 max_width;
+	u16 max_height;
+	u32 max_buffer_size;
+	u8  num_buffers;
+	u8  num_devices;
+	int device_ids[2]; /* -1 for any videoX */
+};
+
 extern const void *__omap_get_config(u16 tag, size_t len, int nr);
 
 #define omap_get_config(tag, type) \
-	((const type *) __omap_get_config((tag), sizeof(type), 0))
+	((const type*) __omap_get_config((tag), sizeof(type), 0))
 #define omap_get_nr_config(tag, type, nr) \
-	((const type *) __omap_get_config((tag), sizeof(type), (nr)))
+	((const type*) __omap_get_config((tag), sizeof(type), (nr)))
 
 extern const void *omap_get_var_config(u16 tag, size_t *len);
 

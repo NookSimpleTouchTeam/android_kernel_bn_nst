@@ -385,6 +385,8 @@ static const char *rfkill_get_type_str(enum rfkill_type type)
 		return "wimax";
 	case RFKILL_TYPE_WWAN:
 		return "wwan";
+	case RFKILL_TYPE_FM:
+		return "fm";
 	default:
 		BUG();
 	}
@@ -512,7 +514,7 @@ static void rfkill_release(struct device *dev)
 	module_put(THIS_MODULE);
 }
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_RFKILL_PM
 static int rfkill_suspend(struct device *dev, pm_message_t state)
 {
 	struct rfkill *rfkill = to_rfkill(dev);

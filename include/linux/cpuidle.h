@@ -17,7 +17,7 @@
 #include <linux/kobject.h>
 #include <linux/completion.h>
 
-#define CPUIDLE_STATE_MAX	8
+#define CPUIDLE_STATE_MAX	16
 #define CPUIDLE_NAME_LEN	16
 #define CPUIDLE_DESC_LEN	32
 
@@ -88,6 +88,7 @@ struct cpuidle_device {
 
 	int			last_residency;
 	int			state_count;
+	int			max_state;
 	struct cpuidle_state	states[CPUIDLE_STATE_MAX];
 	struct cpuidle_state_kobj *kobjs[CPUIDLE_STATE_MAX];
 	struct cpuidle_state	*last_state;

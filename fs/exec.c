@@ -714,6 +714,41 @@ int kernel_read(struct file *file, unsigned long offset,
 
 EXPORT_SYMBOL(kernel_read);
 
+#ifdef CONFIG_BATTERY_MAX17042
+#if 1
+ssize_t kernel_write(struct file *file, const char *buf, size_t count, loff_t pos)
+{
+                mm_segment_t old_fs;
+                ssize_t res;
+
+                old_fs = get_fs();
+                set_fs(get_ds());
+                /* The cast to a user pointer is valid due to the set_fs() */
+                res = vfs_write(file, (const char __user *)buf, count, &pos);
+                set_fs(old_fs);
+
+                return res;
+}
+#else
+int kernel_write(struct file *file, unsigned long offset, const char * addr, unsigned long count)
+{
+	 mm_segment_t old_fs;
+	 loff_t pos = offset;
+	 int result = -ENOSYS;
+ 
+	 if (!file->f_op->write)
+		 goto fail;
+	 old_fs = get_fs();
+	 set_fs(get_ds());
+	 result = file->f_op->write(file, addr, count, &pos);
+	 set_fs(old_fs);
+fail:
+	 return result;
+}
+#endif
+EXPORT_SYMBOL(kernel_write);
+#endif
+
 static int exec_mmap(struct mm_struct *mm)
 {
 	struct task_struct *tsk;

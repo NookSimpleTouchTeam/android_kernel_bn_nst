@@ -309,6 +309,8 @@ extern void i2c_unregister_device(struct i2c_client *);
 extern int
 i2c_register_board_info(int busnum, struct i2c_board_info const *info,
 			unsigned n);
+extern void __init
+i2c_remove_board_info(char *type, unsigned short	addr,struct i2c_board_info *info, unsigned *len);
 #else
 static inline int
 i2c_register_board_info(int busnum, struct i2c_board_info const *info,
@@ -316,6 +318,12 @@ i2c_register_board_info(int busnum, struct i2c_board_info const *info,
 {
 	return 0;
 }
+static inline void 
+i2c_remove_board_info(char *type, unsigned short	addr,struct i2c_board_info *info, unsigned *len)
+{
+}
+
+
 #endif
 
 /*

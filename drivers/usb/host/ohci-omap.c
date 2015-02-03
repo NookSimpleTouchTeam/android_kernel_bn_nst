@@ -26,8 +26,11 @@
 
 #include <mach/mux.h>
 #include <mach/irqs.h>
+#include <mach/gpio.h>
 #include <mach/fpga.h>
 #include <mach/usb.h>
+
+#include "ehci-omap.h"
 
 
 /* OMAP-1510 OHCI has its own MMU for DMA */
@@ -65,13 +68,19 @@ static inline int tps65010_set_gpio_out_value(unsigned gpio, unsigned value)
 extern int usb_disabled(void);
 extern int ocpi_enable(void);
 
+#ifndef CONFIG_ARCH_OMAP34XX
 static struct clk *usb_host_ck;
 static struct clk *usb_dc_ck;
+#endif
+
 static int host_enabled;
 static int host_initialized;
+static int usb_clocks_enabled;
+static int usb_bus_suspended;
 
 static void omap_ohci_clock_power(int on)
 {
+#ifndef CONFIG_ARCH_OMAP34XX
 	if (on) {
 		clk_enable(usb_dc_ck);
 		clk_enable(usb_host_ck);
@@ -81,6 +90,23 @@ static void omap_ohci_clock_power(int on)
 		clk_disable(usb_host_ck);
 		clk_disable(usb_dc_ck);
 	}
+#else
+	if (on) {
+		clk_enable(clk_get(NULL, "usbtll_ick"));
+		clk_enable(clk_get(NULL, "usbtll_fck"));
+		clk_enable(clk_get(NULL, "usbhost_ick"));
+		clk_enable(clk_get(NULL, "usbhost_120m_fck"));
+		clk_enable(clk_get(NULL, "usbhost_48m_fck"));
+		usb_clocks_enabled = 1;
+	} else {
+		clk_disable(clk_get(NULL, "usbhost_ick"));
+		clk_disable(clk_get(NULL, "usbhost_48m_fck"));
+		clk_disable(clk_get(NULL, "usbhost_120m_fck"));
+		clk_disable(clk_get(NULL, "usbtll_ick"));
+		clk_disable(clk_get(NULL, "usbtll_fck"));
+		usb_clocks_enabled = 0;
+	}
+#endif
 }
 
 /*
@@ -252,6 +278,7 @@ static int ohci_omap_init(struct usb_hcd *hcd)
 
 			rh &= ~RH_A_NOCP;
 
+#ifndef CONFIG_ARCH_OMAP34XX
 			/* gpio9 for overcurrent detction */
 			omap_cfg_reg(W8_1610_GPIO9);
 			gpio_request(9, "OHCI overcurrent");
@@ -259,6 +286,7 @@ static int ohci_omap_init(struct usb_hcd *hcd)
 
 			/* for paranoia's sake:  disable USB.PUEN */
 			omap_cfg_reg(W4_USB_HIGHZ);
+#endif
 		}
 		ohci_writel(ohci, rh, &ohci->regs->roothub.a);
 		ohci->flags &= ~OHCI_QUIRK_HUB_POWER;
@@ -282,7 +310,7 @@ static int ohci_omap_init(struct usb_hcd *hcd)
 static void ohci_omap_stop(struct usb_hcd *hcd)
 {
 	dev_dbg(hcd->self.controller, "stopping USB Controller\n");
-	omap_ohci_clock_power(0);
+	ohci_stop(hcd);
 }
 
 
@@ -315,7 +343,8 @@ static int usb_hcd_omap_probe (const struct hc_driver *driver,
 		return -ENODEV;
 	}
 
-	usb_host_ck = clk_get(&pdev->dev, "usb_hhc_ck");
+#ifndef CONFIG_ARCH_OMAP34XX
+	usb_host_ck = clk_get(0, "usb_hhc_ck");
 	if (IS_ERR(usb_host_ck))
 		return PTR_ERR(usb_host_ck);
 
@@ -328,6 +357,7 @@ static int usb_hcd_omap_probe (const struct hc_driver *driver,
 		clk_put(usb_host_ck);
 		return PTR_ERR(usb_dc_ck);
 	}
+#endif
 
 
 	hcd = usb_create_hcd (driver, &pdev->dev, dev_name(&pdev->dev));
@@ -379,8 +409,11 @@ err2:
 err1:
 	usb_put_hcd(hcd);
 err0:
+
+#ifndef CONFIG_ARCH_OMAP34XX
 	clk_put(usb_dc_ck);
 	clk_put(usb_host_ck);
+#endif
 	return retval;
 }
 
@@ -406,13 +439,25 @@ usb_hcd_omap_remove (struct usb_hcd *hcd, struct platform_device *pdev)
 		(void) otg_set_host(ohci->transceiver, 0);
 		put_device(ohci->transceiver->dev);
 	}
+
+	/* Reset the USB Host controller to allow rmmod to work */
+	omap_writel(1 << 1, OMAP_UHH_SYSCONFIG);
+	while (!(omap_readl(OMAP_UHH_SYSSTATUS) & (1 << 0)));
+	while (!(omap_readl(OMAP_UHH_SYSSTATUS) & (1 << 1)));
+	while (!(omap_readl(OMAP_UHH_SYSSTATUS) & (1 << 2)));
+
+#ifndef CONFIG_ARCH_OMAP34XX
 	if (machine_is_omap_osk())
 		gpio_free(9);
+#endif
 	iounmap(hcd->regs);
 	release_mem_region(hcd->rsrc_start, hcd->rsrc_len);
 	usb_put_hcd(hcd);
+
+#ifndef CONFIG_ARCH_OMAP34XX
 	clk_put(usb_dc_ck);
 	clk_put(usb_host_ck);
+#endif
 }
 
 /*-------------------------------------------------------------------------*/
@@ -441,6 +486,34 @@ ohci_omap_start (struct usb_hcd *hcd)
 }
 
 /*-------------------------------------------------------------------------*/
+
+#ifdef CONFIG_PM
+static int omap_ohci_bus_suspend(struct usb_hcd *hcd)
+{
+	int ret = 0;
+
+	ret = ohci_bus_suspend(hcd);
+	mdelay(8);
+	omap_ohci_clock_power(0);
+	usb_bus_suspended = 1;
+	clear_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags);
+
+	return ret;
+}
+
+static int omap_ohci_bus_resume(struct usb_hcd *hcd)
+{
+	int ret = 0;
+
+	if (!usb_clocks_enabled)
+		omap_ohci_clock_power(1);
+	set_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags);
+	ret = ohci_bus_resume(hcd);
+	usb_bus_suspended = 1;
+
+	return ret;
+}
+#endif
 
 static const struct hc_driver ohci_omap_hc_driver = {
 	.description =		hcd_name,
@@ -479,8 +552,8 @@ static const struct hc_driver ohci_omap_hc_driver = {
 	.hub_status_data =	ohci_hub_status_data,
 	.hub_control =		ohci_hub_control,
 #ifdef	CONFIG_PM
-	.bus_suspend =		ohci_bus_suspend,
-	.bus_resume =		ohci_bus_resume,
+	.bus_suspend =		omap_ohci_bus_suspend,
+	.bus_resume =		omap_ohci_bus_resume,
 #endif
 	.start_port_reset =	ohci_start_port_reset,
 };
@@ -496,7 +569,10 @@ static int ohci_hcd_omap_drv_remove(struct platform_device *dev)
 {
 	struct usb_hcd		*hcd = platform_get_drvdata(dev);
 
+	if (!usb_clocks_enabled)
+		omap_ohci_clock_power(1);
 	usb_hcd_omap_remove(hcd, dev);
+	omap_ohci_clock_power(0);
 	platform_set_drvdata(dev, NULL);
 
 	return 0;
@@ -514,7 +590,8 @@ static int ohci_omap_suspend(struct platform_device *dev, pm_message_t message)
 		msleep(5);
 	ohci->next_statechange = jiffies;
 
-	omap_ohci_clock_power(0);
+	if (usb_clocks_enabled)
+		omap_ohci_clock_power(0);
 	ohci_to_hcd(ohci)->state = HC_STATE_SUSPENDED;
 	return 0;
 }
@@ -530,6 +607,10 @@ static int ohci_omap_resume(struct platform_device *dev)
 
 	omap_ohci_clock_power(1);
 	ohci_finish_controller_resume(hcd);
+
+	if (usb_bus_suspended)
+		omap_ohci_clock_power(0);
+
 	return 0;
 }
 

@@ -33,21 +33,26 @@
 #include <linux/delay.h>
 #include <linux/platform_device.h>
 #include <linux/mutex.h>
+#include <linux/spinlock.h>
 #include <linux/errno.h>
+#include <linux/i2c/menelaus.h>
 #include <mach/gpio.h>
 #include <mach/keypad.h>
-#include <mach/menelaus.h>
 #include <asm/irq.h>
 #include <mach/hardware.h>
 #include <asm/io.h>
+#include <asm/mach-types.h>
 #include <mach/mux.h>
 
 #undef NEW_BOARD_LEARNING_MODE
 
 static void omap_kp_tasklet(unsigned long);
+static void omap_kp_switch_tasklet(unsigned long);
 static void omap_kp_timer(unsigned long);
 
 static unsigned char keypad_state[8];
+static unsigned char *switch_state;
+
 static DEFINE_MUTEX(kp_enable_mutex);
 static int kp_enable = 1;
 static int kp_cur_group = -1;
@@ -60,15 +65,20 @@ struct omap_kp {
 	unsigned int cols;
 	unsigned long delay;
 	unsigned int debounce;
+	int suspended;
+	spinlock_t suspend_lock;
 };
 
 static DECLARE_TASKLET_DISABLED(kp_tasklet, omap_kp_tasklet, 0);
+static DECLARE_TASKLET_DISABLED(switch_tasklet, omap_kp_switch_tasklet, 0);
 
 static int *keymap;
 static unsigned int *row_gpios;
 static unsigned int *col_gpios;
+static struct omap_kp_switchmap *switchmap;
+static int switchmap_size;
 
-#ifdef CONFIG_ARCH_OMAP2
+#if defined(CONFIG_ARCH_OMAP2) || defined(CONFIG_ARCH_OMAP3)
 static void set_col_gpio_val(struct omap_kp *omap_kp, u8 value)
 {
 	int col;
@@ -96,9 +106,17 @@ static u8 get_row_gpio_val(struct omap_kp *omap_kp)
 static irqreturn_t omap_kp_interrupt(int irq, void *dev_id)
 {
 	struct omap_kp *omap_kp = dev_id;
+	unsigned long flags;
+
+	spin_lock_irqsave(&omap_kp->suspend_lock, flags);
+	if (omap_kp->suspended) {
+		spin_unlock_irqrestore(&omap_kp->suspend_lock, flags);
+		return IRQ_HANDLED;
+	}
+	spin_unlock_irqrestore(&omap_kp->suspend_lock, flags);
 
 	/* disable keyboard interrupt and schedule for handling */
-	if (cpu_is_omap24xx()) {
+	if (cpu_is_omap24xx() || cpu_is_omap34xx()) {
 		int i;
 		for (i = 0; i < omap_kp->rows; i++)
 			disable_irq(gpio_to_irq(row_gpios[i]));
@@ -111,6 +129,27 @@ static irqreturn_t omap_kp_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+static irqreturn_t omap_kp_switch_interrupt(int irq, void *dev_id)
+{
+	struct omap_kp *omap_kp = dev_id;
+	unsigned long flags;
+	int i;
+
+	spin_lock_irqsave(&omap_kp->suspend_lock, flags);
+	if (omap_kp->suspended) {
+		spin_unlock_irqrestore(&omap_kp->suspend_lock, flags);
+		return IRQ_HANDLED;
+	}
+	spin_unlock_irqrestore(&omap_kp->suspend_lock, flags);
+
+	for (i = 0 ; i < switchmap_size ; i++) {
+		struct omap_kp_switchmap sw = switchmap[i];
+		disable_irq_nosync(gpio_to_irq(sw.gpio));
+	}
+	tasklet_schedule(&switch_tasklet);
+	return IRQ_HANDLED;
+}
+
 static void omap_kp_timer(unsigned long data)
 {
 	tasklet_schedule(&kp_tasklet);
@@ -119,12 +158,12 @@ static void omap_kp_timer(unsigned long data)
 static void omap_kp_scan_keypad(struct omap_kp *omap_kp, unsigned char *state)
 {
 	int col = 0;
-
 	/* read the keypad status */
-	if (cpu_is_omap24xx()) {
+	if (cpu_is_omap24xx() || cpu_is_omap34xx()) {
 		/* read the keypad status */
 		for (col = 0; col < omap_kp->cols; col++) {
 			set_col_gpio_val(omap_kp, ~(1 << col));
+			udelay(omap_kp->delay);
 			state[col] = ~(get_row_gpio_val(omap_kp)) & 0xff;
 		}
 		set_col_gpio_val(omap_kp, 0);
@@ -158,6 +197,24 @@ static inline int omap_kp_find_key(int col, int row)
 		if ((keymap[i] & 0xff000000) == key)
 			return keymap[i] & 0x00ffffff;
 	return -1;
+}
+
+static void omap_kp_switch_tasklet(unsigned long data)
+{
+	struct omap_kp *omap_kp_data = (struct omap_kp *) data;
+	int i;
+
+	for (i = 0 ; i < switchmap_size ; i++) {
+		struct omap_kp_switchmap sw = switchmap[i];
+		int new_state = (gpio_get_value(sw.gpio) > 0) ? 0 : 1;
+
+		if (new_state != switch_state[i]) {
+			switch_state[i] = new_state;
+			input_report_switch(omap_kp_data->input, sw.key,
+					    new_state);
+		}
+		enable_irq(gpio_to_irq(sw.gpio));
+	}
 }
 
 static void omap_kp_tasklet(unsigned long data)
@@ -217,7 +274,7 @@ static void omap_kp_tasklet(unsigned long data)
 		mod_timer(&omap_kp_data->timer, jiffies + delay);
 	} else {
 		/* enable interrupts */
-		if (cpu_is_omap24xx()) {
+		if (cpu_is_omap24xx() || cpu_is_omap34xx()) {
 			int i;
 			for (i = 0; i < omap_kp_data->rows; i++)
 				enable_irq(gpio_to_irq(row_gpios[i]));
@@ -258,20 +315,56 @@ static ssize_t omap_kp_enable_store(struct device *dev, struct device_attribute 
 	return strnlen(buf, count);
 }
 
+static int omap_kp_enable_switch_irqs(struct omap_kp_platform_data *pdata,
+				      struct omap_kp *omap_kp)
+{
+	int i;
+	struct omap_kp_switchmap sw;
+
+	for (i = 0 ; i < pdata->switchmapsize ; i++) {
+		sw = pdata->switchmap[i];
+
+		if (request_irq(gpio_to_irq(sw.gpio),
+				(void *) omap_kp_switch_interrupt,
+				IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING,
+				"omap-keypad switch",
+				omap_kp) < 0) {
+			gpio_free(sw.gpio);
+			printk(KERN_ERR "Failed to request irq for switch");
+			return -1;
+		}
+	}
+	return 0;
+}
+
 static DEVICE_ATTR(enable, S_IRUGO | S_IWUSR, omap_kp_enable_show, omap_kp_enable_store);
 
 #ifdef CONFIG_PM
 static int omap_kp_suspend(struct platform_device *dev, pm_message_t state)
 {
-	/* Nothing yet */
+	struct omap_kp *omap_kp = platform_get_drvdata(dev);
+	unsigned long flags;
+	spin_lock_irqsave(&omap_kp->suspend_lock, flags);
 
+	/*
+	 * Re-enable the interrupt in case it has been masked by the
+	 * handler and a key is still pressed.  We need the interrupt
+	 * to wake us up from suspended.
+	 */
+	if (cpu_class_is_omap1())
+		omap_writew(0, OMAP_MPUIO_BASE + OMAP_MPUIO_KBD_MASKIT);
+
+	omap_kp->suspended = 1;
+
+	spin_unlock_irqrestore(&omap_kp->suspend_lock, flags);
 	return 0;
 }
 
 static int omap_kp_resume(struct platform_device *dev)
 {
-	/* Nothing yet */
+	struct omap_kp *omap_kp = platform_get_drvdata(dev);
 
+	omap_kp->suspended = 0;
 	return 0;
 }
 #else
@@ -284,30 +377,40 @@ static int __devinit omap_kp_probe(struct platform_device *pdev)
 	struct omap_kp *omap_kp;
 	struct input_dev *input_dev;
 	struct omap_kp_platform_data *pdata =  pdev->dev.platform_data;
-	int i, col_idx, row_idx, irq_idx, ret;
+	int i, col_idx = 0, row_idx = 0, irq_idx, ret;
 
 	if (!pdata->rows || !pdata->cols || !pdata->keymap) {
 		printk(KERN_ERR "No rows, cols or keymap from pdata\n");
 		return -EINVAL;
 	}
+	if (!cpu_is_omap34xx() && pdata->switchmapsize > 0) {
+		printk(KERN_ERR "Switches not supported on non-omap34xx\n");
+		return -EINVAL;
+	}
 
 	omap_kp = kzalloc(sizeof(struct omap_kp), GFP_KERNEL);
+	switch_state = kzalloc(pdata->switchmapsize, GFP_KERNEL);
 	input_dev = input_allocate_device();
-	if (!omap_kp || !input_dev) {
+	if (!omap_kp || !switch_state || !input_dev) {
 		kfree(omap_kp);
+		kfree(switch_state);
 		input_free_device(input_dev);
 		return -ENOMEM;
 	}
 
 	platform_set_drvdata(pdev, omap_kp);
 
+	spin_lock_init(&omap_kp->suspend_lock);
 	omap_kp->input = input_dev;
+	omap_kp->suspended = 0;
 
 	/* Disable the interrupt for the MPUIO keyboard */
-	if (!cpu_is_omap24xx())
+	if (!cpu_is_omap24xx() && !cpu_is_omap34xx())
 		omap_writew(1, OMAP_MPUIO_BASE + OMAP_MPUIO_KBD_MASKIT);
 
 	keymap = pdata->keymap;
+	switchmap = pdata->switchmap;
+	switchmap_size = pdata->switchmapsize;
 
 	if (pdata->rep)
 		__set_bit(EV_REP, input_dev->evbit);
@@ -323,7 +426,7 @@ static int __devinit omap_kp_probe(struct platform_device *pdev)
 	omap_kp->rows = pdata->rows;
 	omap_kp->cols = pdata->cols;
 
-	if (cpu_is_omap24xx()) {
+	if (cpu_is_omap24xx() || cpu_is_omap34xx()) {
 		/* Cols: outputs */
 		for (col_idx = 0; col_idx < omap_kp->cols; col_idx++) {
 			if (gpio_request(col_gpios[col_idx], "omap_kp_col") < 0) {
@@ -344,6 +447,17 @@ static int __devinit omap_kp_probe(struct platform_device *pdev)
 			}
 			gpio_direction_input(row_gpios[row_idx]);
 		}
+		/* Switches */
+		for (i = 0 ; i < switchmap_size ; i++) {
+			struct omap_kp_switchmap sw = switchmap[i];
+			if (gpio_request(sw.gpio, "omap_switch") < 0) {
+				printk(KERN_ERR "Failed to request"
+				       "GPIO%d for switch\n", sw.gpio);
+				goto err2;
+			}
+			gpio_direction_input(sw.gpio);
+		}
+
 	} else {
 		col_idx = 0;
 		row_idx = 0;
@@ -355,18 +469,30 @@ static int __devinit omap_kp_probe(struct platform_device *pdev)
 	tasklet_enable(&kp_tasklet);
 	kp_tasklet.data = (unsigned long) omap_kp;
 
+	tasklet_enable(&switch_tasklet);
+	switch_tasklet.data = (unsigned long) omap_kp;
+
 	ret = device_create_file(&pdev->dev, &dev_attr_enable);
 	if (ret < 0)
 		goto err2;
 
 	/* setup input device */
 	__set_bit(EV_KEY, input_dev->evbit);
+	if (pdata->switchmapsize > 0)
+		__set_bit(EV_SW, input_dev->evbit);
 	for (i = 0; keymap[i] != 0; i++)
 		__set_bit(keymap[i] & KEY_MAX, input_dev->keybit);
-	input_dev->name = "omap-keypad";
-	input_dev->phys = "omap-keypad/input0";
-	input_dev->dev.parent = &pdev->dev;
 
+	if (pdata->input_name)
+		input_dev->name = pdata->input_name;
+	else
+		input_dev->name = "omap-keypad";
+	if (pdata->input_phys_device)
+		input_dev->phys = pdata->input_phys_device;
+	else
+		input_dev->phys = "omap-keypad/input0";
+
+	input_dev->dev.parent = &pdev->dev;
 	input_dev->id.bustype = BUS_HOST;
 	input_dev->id.vendor = 0x0001;
 	input_dev->id.product = 0x0001;
@@ -381,9 +507,19 @@ static int __devinit omap_kp_probe(struct platform_device *pdev)
 	if (pdata->dbounce)
 		omap_writew(0xff, OMAP_MPUIO_BASE + OMAP_MPUIO_GPIO_DEBOUNCING);
 
-	/* scan current status and enable interrupt */
+	/* scan current status */
 	omap_kp_scan_keypad(omap_kp, keypad_state);
-	if (!cpu_is_omap24xx()) {
+	for (i = 0 ; i < switchmap_size ; i++) {
+		struct omap_kp_switchmap sw = switchmap[i];
+		int new_state = (gpio_get_value(sw.gpio) > 0) ? 0 : 1;
+		__set_bit(sw.key, input_dev->swbit);
+		if (new_state)
+			__set_bit(sw.key, input_dev->sw);
+		switch_state[i] = new_state;
+	}
+
+	/* enable interrupts */
+	if (!cpu_is_omap24xx() && !cpu_is_omap34xx()) {
 		omap_kp->irq = platform_get_irq(pdev, 0);
 		if (omap_kp->irq >= 0) {
 			if (request_irq(omap_kp->irq, omap_kp_interrupt, 0,
@@ -399,17 +535,23 @@ static int __devinit omap_kp_probe(struct platform_device *pdev)
 					"omap-keypad", omap_kp) < 0)
 				goto err5;
 		}
+		if (omap_kp_enable_switch_irqs(pdata, omap_kp))
+			goto err5;
 	}
 	return 0;
 err5:
 	for (i = irq_idx - 1; i >=0; i--)
 		free_irq(row_gpios[i], 0);
+	for (i = 0 ; i < switchmap_size ; i++)
+		free_irq(gpio_to_irq(switchmap[i].gpio), 0);
 err4:
 	input_unregister_device(omap_kp->input);
 	input_dev = NULL;
 err3:
 	device_remove_file(&pdev->dev, &dev_attr_enable);
 err2:
+	for (i = 0 ; i < switchmap_size ; i++)
+		gpio_free(switchmap[i].gpio);
 	for (i = row_idx - 1; i >=0; i--)
 		gpio_free(row_gpios[i]);
 err1:
@@ -428,13 +570,19 @@ static int __devexit omap_kp_remove(struct platform_device *pdev)
 
 	/* disable keypad interrupt handling */
 	tasklet_disable(&kp_tasklet);
-	if (cpu_is_omap24xx()) {
+	tasklet_disable(&switch_tasklet);
+	if (cpu_is_omap24xx() || cpu_is_omap34xx()) {
 		int i;
 		for (i = 0; i < omap_kp->cols; i++)
 			gpio_free(col_gpios[i]);
 		for (i = 0; i < omap_kp->rows; i++) {
 			gpio_free(row_gpios[i]);
 			free_irq(gpio_to_irq(row_gpios[i]), 0);
+		}
+		for (i = 0 ; i < switchmap_size ; i++) {
+			struct omap_kp_switchmap sw = switchmap[i];
+			gpio_free(sw.gpio);
+			free_irq(gpio_to_irq(sw.gpio), 0);
 		}
 	} else {
 		omap_writew(1, OMAP_MPUIO_BASE + OMAP_MPUIO_KBD_MASKIT);
@@ -443,10 +591,12 @@ static int __devexit omap_kp_remove(struct platform_device *pdev)
 
 	del_timer_sync(&omap_kp->timer);
 	tasklet_kill(&kp_tasklet);
+	tasklet_kill(&switch_tasklet);
 
 	/* unregister everything */
 	input_unregister_device(omap_kp->input);
 
+	kfree(switch_state);
 	kfree(omap_kp);
 
 	return 0;

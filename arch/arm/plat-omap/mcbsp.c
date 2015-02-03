@@ -91,11 +91,21 @@ static void omap_mcbsp_dump_reg(u8 id)
 static irqreturn_t omap_mcbsp_tx_irq_handler(int irq, void *dev_id)
 {
 	struct omap_mcbsp *mcbsp_tx = dev_id;
+	u16 irqst_spcr2;
 
-	dev_dbg(mcbsp_tx->dev, "TX IRQ callback : 0x%x\n",
-		OMAP_MCBSP_READ(mcbsp_tx->io_base, SPCR2));
+	irqst_spcr2 = OMAP_MCBSP_READ(mcbsp_tx->io_base, SPCR2);
+	dev_dbg(mcbsp_tx->dev, "TX IRQ callback : 0x%x\n", irqst_spcr2);
 
-	complete(&mcbsp_tx->tx_irq_completion);
+	if (irqst_spcr2 & XSYNC_ERR) {
+		dev_err(mcbsp_tx->dev, "TX Frame Sync Error! : 0x%x\n",
+			irqst_spcr2);
+
+		/* Writing zero to XSYNC_ERR clears the IRQ */
+		OMAP_MCBSP_WRITE(mcbsp_tx->io_base, SPCR2,
+			irqst_spcr2 & ~(XSYNC_ERR));
+	} else {
+		complete(&mcbsp_tx->tx_irq_completion);
+	}
 
 	return IRQ_HANDLED;
 }
@@ -103,11 +113,20 @@ static irqreturn_t omap_mcbsp_tx_irq_handler(int irq, void *dev_id)
 static irqreturn_t omap_mcbsp_rx_irq_handler(int irq, void *dev_id)
 {
 	struct omap_mcbsp *mcbsp_rx = dev_id;
+	u16 irqst_spcr1;
 
-	dev_dbg(mcbsp_rx->dev, "RX IRQ callback : 0x%x\n",
-		OMAP_MCBSP_READ(mcbsp_rx->io_base, SPCR2));
+	irqst_spcr1 = OMAP_MCBSP_READ(mcbsp_rx->io_base, SPCR1);
+	dev_dbg(mcbsp_rx->dev, "RX IRQ callback : 0x%x\n", irqst_spcr1);
 
-	complete(&mcbsp_rx->rx_irq_completion);
+	if (irqst_spcr1 & RSYNC_ERR) {
+		dev_err(mcbsp_rx->dev, "RX Frame Sync Error! : 0x%x\n",
+			irqst_spcr1);
+		/* Writing zero to RSYNC_ERR clears the IRQ */
+		OMAP_MCBSP_WRITE(mcbsp_rx->io_base, SPCR1,
+			irqst_spcr1 & ~(RSYNC_ERR));
+	} else {
+		complete(&mcbsp_rx->tx_irq_completion);
+	}
 
 	return IRQ_HANDLED;
 }
@@ -140,6 +159,42 @@ static void omap_mcbsp_rx_dma_callback(int lch, u16 ch_status, void *data)
 	complete(&mcbsp_dma_rx->rx_dma_completion);
 }
 
+/**
+  * Debug function for getting the pending operation status
+  * for a serial channel. 
+  */
+
+unsigned int omap_mcbsp_pending_status(unsigned int id)
+{
+	struct omap_mcbsp *mcbsp;
+    unsigned int result = 0;
+
+	if (!omap_mcbsp_check_valid_id(id)) {
+		printk(KERN_ERR "%s: Invalid id (%d)\n", __func__, id + 1);
+		return 0;
+	}
+
+    mcbsp = id_to_mcbsp_ptr(id);
+
+    if (completion_done(&mcbsp->tx_irq_completion)) {
+        result |= 0x1;
+    }
+
+    if (completion_done(&mcbsp->rx_irq_completion)) {
+        result |= 0x2;
+    }
+
+    if (completion_done(&mcbsp->tx_dma_completion)) {
+        result |= 0x4;
+    }
+
+    if (completion_done(&mcbsp->rx_dma_completion)) {
+        result |= 0x8;
+    }
+
+    return result;
+}
+
 /*
  * omap_mcbsp_config simply write a config to the
  * appropriate McBSP.
@@ -161,6 +216,33 @@ void omap_mcbsp_config(unsigned int id, const struct omap_mcbsp_reg_cfg *config)
 	dev_dbg(mcbsp->dev, "Configuring McBSP%d  phys_base: 0x%08lx\n",
 			mcbsp->id, mcbsp->phys_base);
 
+	/*
+	 * Re-do SYSC settings here. Today McBSP doesn't have OFF mode handling
+	 * It expects client's to take care of this, which is not the right way
+	 * to do. SYSC reg's are generic reg and client needn't know about the
+	 * underlying power settings done by McBSP.
+	 * Audio HAL used to re-start the whole process after suspend/resume
+	 * which used to work as McBSP where getting set again in request() call.
+	 * However, the new Audio HAL doesn't trigger the whole process if
+	 * suspend/resume has hit.  However, it does call config() whenever
+	 * a new streaming is started. And setting the SYSC regtrs here helps.
+	 *
+	 * Other client's of McBSP should as well use config to set the registers
+	 * else they might hit the same issue of sysc context lost over OFF.
+	 *
+	 * REVISIT: The right way to fix; let the McBSP handle context save/restore
+	 * of the common regesters like SYSC based on CORE context id and with LDM
+	 * suspend/resume hooks.
+	 */
+	if (cpu_is_omap34xx()) {
+		u16 w;
+
+		w = OMAP_MCBSP_READ(mcbsp->io_base, SYSCON);
+		w &= ~(ENAWAKEUP | SIDLEMODE(0x03) | CLOCKACTIVITY(0x03));
+		w |= (ENAWAKEUP | SIDLEMODE(0x02) | CLOCKACTIVITY(0x02));
+		OMAP_MCBSP_WRITE(mcbsp->io_base, SYSCON, w);
+	}
+
 	/* We write the given config */
 	OMAP_MCBSP_WRITE(io_base, SPCR2, config->spcr2);
 	OMAP_MCBSP_WRITE(io_base, SPCR1, config->spcr1);
@@ -176,6 +258,7 @@ void omap_mcbsp_config(unsigned int id, const struct omap_mcbsp_reg_cfg *config)
 	if (cpu_is_omap2430() || cpu_is_omap34xx()) {
 		OMAP_MCBSP_WRITE(io_base, XCCR, config->xccr);
 		OMAP_MCBSP_WRITE(io_base, RCCR, config->rccr);
+		OMAP_MCBSP_WRITE(io_base, WAKEUPEN, config->wken);
 	}
 }
 EXPORT_SYMBOL(omap_mcbsp_config);
@@ -226,9 +309,6 @@ int omap_mcbsp_request(unsigned int id)
 	if (mcbsp->pdata && mcbsp->pdata->ops && mcbsp->pdata->ops->request)
 		mcbsp->pdata->ops->request(id);
 
-	for (i = 0; i < mcbsp->num_clks; i++)
-		clk_enable(mcbsp->clks[i]);
-
 	spin_lock(&mcbsp->lock);
 	if (!mcbsp->free) {
 		dev_err(mcbsp->dev, "McBSP%d is currently in use\n",
@@ -239,6 +319,24 @@ int omap_mcbsp_request(unsigned int id)
 
 	mcbsp->free = 0;
 	spin_unlock(&mcbsp->lock);
+
+	for (i = 0; i < mcbsp->num_clks; i++)
+		clk_enable(mcbsp->clks[i]);
+
+	/*
+	 * Enable wakup behavior, smart idle and all wakeups
+	 * REVISIT: some wakeups may be unnecessary
+	 */
+	if (cpu_is_omap34xx()) {
+		u16 w;
+
+		w = OMAP_MCBSP_READ(mcbsp->io_base, SYSCON);
+		w &= ~(ENAWAKEUP | SIDLEMODE(0x03) | CLOCKACTIVITY(0x03));
+		w |= (ENAWAKEUP | SIDLEMODE(0x02) | CLOCKACTIVITY(0x02));
+		OMAP_MCBSP_WRITE(mcbsp->io_base, SYSCON, w);
+
+		OMAP_MCBSP_WRITE(mcbsp->io_base, WAKEUPEN, WAKEUPEN_ALL);
+	}
 
 	/*
 	 * Make sure that transmitter, receiver and sample-rate generator are
@@ -275,6 +373,33 @@ int omap_mcbsp_request(unsigned int id)
 }
 EXPORT_SYMBOL(omap_mcbsp_request);
 
+void omap_mcbsp_disable_fclk(unsigned int id)
+{
+	struct omap_mcbsp *mcbsp;
+
+	if (!omap_mcbsp_check_valid_id(id)) {
+		printk(KERN_ERR "%s: Invalid id (%d)\n", __func__, id + 1);
+		return;
+	}
+	mcbsp = id_to_mcbsp_ptr(id);
+	clk_disable(mcbsp->clks[1]);
+}
+EXPORT_SYMBOL(omap_mcbsp_disable_fclk);
+
+
+void omap_mcbsp_enable_fclk(unsigned int id)
+{
+	struct omap_mcbsp *mcbsp;
+
+	if (!omap_mcbsp_check_valid_id(id)) {
+		printk(KERN_ERR "%s: Invalid id (%d)\n", __func__, id + 1);
+		return;
+	}
+	mcbsp = id_to_mcbsp_ptr(id);
+	clk_enable(mcbsp->clks[1]);
+}
+EXPORT_SYMBOL(omap_mcbsp_enable_fclk);
+
 void omap_mcbsp_free(unsigned int id)
 {
 	struct omap_mcbsp *mcbsp;
@@ -286,11 +411,23 @@ void omap_mcbsp_free(unsigned int id)
 	}
 	mcbsp = id_to_mcbsp_ptr(id);
 
+	/*
+	 * Disable wakup behavior, smart idle and all wakeups
+	 */
+	if (cpu_is_omap34xx()) {
+		u16 w;
+
+		w = OMAP_MCBSP_READ(mcbsp->io_base, SYSCON);
+		w &= ~(ENAWAKEUP | SIDLEMODE(0x03) | CLOCKACTIVITY(0x03));
+		OMAP_MCBSP_WRITE(mcbsp->io_base, SYSCON, w);
+
+		w = OMAP_MCBSP_READ(mcbsp->io_base, WAKEUPEN);
+		w &= ~WAKEUPEN_ALL;
+		OMAP_MCBSP_WRITE(mcbsp->io_base, WAKEUPEN, w);
+	}
+
 	if (mcbsp->pdata && mcbsp->pdata->ops && mcbsp->pdata->ops->free)
 		mcbsp->pdata->ops->free(id);
-
-	for (i = mcbsp->num_clks - 1; i >= 0; i--)
-		clk_disable(mcbsp->clks[i]);
 
 	spin_lock(&mcbsp->lock);
 	if (mcbsp->free) {
@@ -299,7 +436,12 @@ void omap_mcbsp_free(unsigned int id)
 		spin_unlock(&mcbsp->lock);
 		return;
 	}
+	spin_unlock(&mcbsp->lock);
 
+	for (i = mcbsp->num_clks - 1; i >= 0; i--)
+		clk_disable(mcbsp->clks[i]);
+
+	spin_lock(&mcbsp->lock);
 	mcbsp->free = 1;
 	spin_unlock(&mcbsp->lock);
 
@@ -311,15 +453,16 @@ void omap_mcbsp_free(unsigned int id)
 }
 EXPORT_SYMBOL(omap_mcbsp_free);
 
-/*
- * Here we start the McBSP, by enabling the sample
- * generator, both transmitter and receivers,
- * and the frame sync.
- */
-void omap_mcbsp_start(unsigned int id)
+ /*
+  * Here we start the McBSP, by enabling transmitter, receiver or both.
+  * If no transmitter or receiver is active prior calling, then sample-rate
+  * generator and frame sync are started.
+  */
+void omap_mcbsp_start(unsigned int id, int tx, int rx)
 {
 	struct omap_mcbsp *mcbsp;
 	void __iomem *io_base;
+	int idle;
 	u16 w;
 
 	if (!omap_mcbsp_check_valid_id(id)) {
@@ -332,32 +475,40 @@ void omap_mcbsp_start(unsigned int id)
 	mcbsp->rx_word_length = (OMAP_MCBSP_READ(io_base, RCR1) >> 5) & 0x7;
 	mcbsp->tx_word_length = (OMAP_MCBSP_READ(io_base, XCR1) >> 5) & 0x7;
 
-	/* Start the sample generator */
-	w = OMAP_MCBSP_READ(io_base, SPCR2);
-	OMAP_MCBSP_WRITE(io_base, SPCR2, w | (1 << 6));
+	idle = !((OMAP_MCBSP_READ(io_base, SPCR2) |
+		OMAP_MCBSP_READ(io_base, SPCR1)) & 1);
+
+	if (idle) {
+		/* Start the sample generator */
+		w = OMAP_MCBSP_READ(io_base, SPCR2);
+		OMAP_MCBSP_WRITE(io_base, SPCR2, w | (1 << 6));
+	}
 
 	/* Enable transmitter and receiver */
 	w = OMAP_MCBSP_READ(io_base, SPCR2);
-	OMAP_MCBSP_WRITE(io_base, SPCR2, w | 1);
+	OMAP_MCBSP_WRITE(io_base, SPCR2, w | (tx & 1));
 
 	w = OMAP_MCBSP_READ(io_base, SPCR1);
-	OMAP_MCBSP_WRITE(io_base, SPCR1, w | 1);
+	OMAP_MCBSP_WRITE(io_base, SPCR1, w | (rx & 1));
 
 	udelay(100);
 
-	/* Start frame sync */
-	w = OMAP_MCBSP_READ(io_base, SPCR2);
-	OMAP_MCBSP_WRITE(io_base, SPCR2, w | (1 << 7));
+	if (idle) {
+		/* Start frame sync */
+		w = OMAP_MCBSP_READ(io_base, SPCR2);
+		OMAP_MCBSP_WRITE(io_base, SPCR2, w | (1 << 7));
+	}
 
 	/* Dump McBSP Regs */
 	omap_mcbsp_dump_reg(id);
 }
 EXPORT_SYMBOL(omap_mcbsp_start);
 
-void omap_mcbsp_stop(unsigned int id)
+void omap_mcbsp_stop(unsigned int id, int tx, int rx)
 {
 	struct omap_mcbsp *mcbsp;
 	void __iomem *io_base;
+	int idle;
 	u16 w;
 
 	if (!omap_mcbsp_check_valid_id(id)) {
@@ -370,15 +521,20 @@ void omap_mcbsp_stop(unsigned int id)
 
 	/* Reset transmitter */
 	w = OMAP_MCBSP_READ(io_base, SPCR2);
-	OMAP_MCBSP_WRITE(io_base, SPCR2, w & ~(1));
+	OMAP_MCBSP_WRITE(io_base, SPCR2, w & ~(tx & 1));
 
 	/* Reset receiver */
 	w = OMAP_MCBSP_READ(io_base, SPCR1);
-	OMAP_MCBSP_WRITE(io_base, SPCR1, w & ~(1));
+	OMAP_MCBSP_WRITE(io_base, SPCR1, w & ~(rx & 1));
 
-	/* Reset the sample rate generator */
-	w = OMAP_MCBSP_READ(io_base, SPCR2);
-	OMAP_MCBSP_WRITE(io_base, SPCR2, w & ~(1 << 6));
+	idle = !((OMAP_MCBSP_READ(io_base, SPCR2) |
+		OMAP_MCBSP_READ(io_base, SPCR1)) & 1);
+
+	if (idle) {
+		/* Reset the sample rate generator */
+		w = OMAP_MCBSP_READ(io_base, SPCR2);
+		OMAP_MCBSP_WRITE(io_base, SPCR2, w & ~(1 << 6));
+	}
 }
 EXPORT_SYMBOL(omap_mcbsp_stop);
 
@@ -492,9 +648,9 @@ void omap_mcbsp_xmit_word(unsigned int id, u32 word)
 
 	wait_for_completion(&mcbsp->tx_irq_completion);
 
-	if (word_length > OMAP_MCBSP_WORD_16)
-		OMAP_MCBSP_WRITE(io_base, DXR2, word >> 16);
-	OMAP_MCBSP_WRITE(io_base, DXR1, word & 0xffff);
+    if (word_length > OMAP_MCBSP_WORD_16)
+	   	OMAP_MCBSP_WRITE(io_base, DXR2, word >> 16);
+    OMAP_MCBSP_WRITE(io_base, DXR1, word & 0xffff);
 }
 EXPORT_SYMBOL(omap_mcbsp_xmit_word);
 
@@ -866,6 +1022,21 @@ void omap_mcbsp_set_spi_mode(unsigned int id,
 	omap_mcbsp_config(id, &mcbsp_cfg);
 }
 EXPORT_SYMBOL(omap_mcbsp_set_spi_mode);
+
+void omap_mcbsp_set_tx_threshold(unsigned int id, u16 threshold)
+{
+	struct omap_mcbsp       *mcbsp;
+	void __iomem            *io_base;
+	u16                     w;
+
+	mcbsp = id_to_mcbsp_ptr(id);
+	io_base = mcbsp->io_base;
+
+
+	OMAP_MCBSP_WRITE(io_base, THRSH2, threshold-1);
+	w = OMAP_MCBSP_READ(io_base, THRSH2);
+}
+EXPORT_SYMBOL(omap_mcbsp_set_tx_threshold);
 
 /*
  * McBSP1 and McBSP3 are directly mapped on 1610 and 1510.

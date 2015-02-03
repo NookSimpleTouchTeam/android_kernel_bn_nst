@@ -19,6 +19,13 @@ config MMC_DEBUG
 	  This is an option for use by developers; most people should
 	  say N here.  This enables MMC core and driver debugging.
 
+config MMC_LOG
+	bool "MMC logging"
+	depends on MMC != n
+	help
+	  This is an option for use by developers; most people should
+	  say N here.  This enables additional MMC read/write logging.
+
 if MMC
 
 source "drivers/mmc/core/Kconfig"

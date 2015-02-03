@@ -309,6 +309,14 @@ struct musb {
 	struct clk		*clock;
 	irqreturn_t		(*isr)(int, void *);
 	struct work_struct	irq_work;
+#define MUSB_HWVERS_MAJOR(x)	((x >> 10) & 0x1f)
+#define MUSB_HWVERS_MINOR(x)	(x & 0x3ff)
+#define MUSB_HWVERS_RC		0x8000
+#define MUSB_HWVERS_1300	0x52C
+#define MUSB_HWVERS_1400	0x590
+#define MUSB_HWVERS_1800	0x720
+#define MUSB_HWVERS_2000	0x800
+	u16			hwvers;
 
 /* this hub status bit is reserved by USB 2.0 and not seen by usbcore */
 #define MUSB_PORT_STAT_RESUME	(1 << 31)
@@ -526,6 +534,9 @@ extern void musb_read_fifo(struct musb_hw_ep *ep, u16 len, u8 *dst);
 extern void musb_load_testpacket(struct musb *);
 
 extern irqreturn_t musb_interrupt(struct musb *);
+
+extern void musb_platform_save_context(struct musb *musb);
+extern void musb_platform_restore_context(struct musb *musb);
 
 extern void musb_platform_enable(struct musb *musb);
 extern void musb_platform_disable(struct musb *musb);

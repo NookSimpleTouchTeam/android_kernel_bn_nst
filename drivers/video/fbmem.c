@@ -413,7 +413,7 @@ static void fb_do_show_logo(struct fb_info *info, struct fb_image *image,
 }
 
 static int fb_show_logo_line(struct fb_info *info, int rotate,
-			     const struct linux_logo *logo, int y,
+			     const struct linux_logo *logo, int x, int y,
 			     unsigned int n)
 {
 	u32 *palette = NULL, *saved_pseudo_palette = NULL;
@@ -458,7 +458,8 @@ static int fb_show_logo_line(struct fb_info *info, int rotate,
 		fb_set_logo(info, logo, logo_new, fb_logo.depth);
 	}
 
-	image.dx = 0;
+	// Encore: Position at X and Y.
+	image.dx = x;
 	image.dy = y;
 	image.width = logo->width;
 	image.height = logo->height;
@@ -524,13 +525,13 @@ static int fb_prepare_extra_logos(struct fb_info *info, unsigned int height,
 	return height;
 }
 
-static int fb_show_extra_logos(struct fb_info *info, int y, int rotate)
+static int fb_show_extra_logos(struct fb_info *info, int x, int y, int rotate)
 {
 	unsigned int i;
 
 	for (i = 0; i < fb_logo_ex_num; i++)
 		y += fb_show_logo_line(info, rotate,
-				       fb_logo_ex[i].logo, y, fb_logo_ex[i].n);
+				       fb_logo_ex[i].logo, x, y, fb_logo_ex[i].n);
 
 	return y;
 }
@@ -544,7 +545,7 @@ static inline int fb_prepare_extra_logos(struct fb_info *info,
 	return height;
 }
 
-static inline int fb_show_extra_logos(struct fb_info *info, int y, int rotate)
+static inline int fb_show_extra_logos(struct fb_info *info, int x, int y, int rotate)
 {
 	return y;
 }
@@ -622,11 +623,13 @@ int fb_prepare_logo(struct fb_info *info, int rotate)
 
 int fb_show_logo(struct fb_info *info, int rotate)
 {
-	int y;
-
-	y = fb_show_logo_line(info, rotate, fb_logo.logo, 0,
+	// Encore: Position in centre of screen.
+	int x = 343;
+	int y = 0;
+	
+	y += fb_show_logo_line(info, rotate, fb_logo.logo, x, y,
 			      num_online_cpus());
-	y = fb_show_extra_logos(info, y, rotate);
+	// y += fb_show_extra_logos(info, x, y, rotate);
 
 	return y;
 }
